@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Kanami 需要访问音频，才能把本机声音发送到局域网的其他设备。</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Kanami 需要录制系统音频，才能把本机正在播放的声音实时送到其他设备。</string>
+</dict>
+</plist>

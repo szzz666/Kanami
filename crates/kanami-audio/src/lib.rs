@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod codec;
 pub mod jitter;
 pub mod mixer;
 pub mod resample;

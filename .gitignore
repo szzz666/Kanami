@@ -16,3 +16,6 @@ src-tauri/gen/
 
 # 本地自测产物
 *.log
+
+# 构建时编译出来的采集助手
+src-tauri/capture/kanami-capture

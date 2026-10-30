@@ -5,14 +5,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  # 快检：每次 push 都跑，目标是把反馈压到五分钟内。
-  # 三个平台并行做类型检查，确保「在别的 OS 上编不过」这类问题不会拖到发版才发现。
+  # 快检：每次 push 都跑，目标五分钟内出结果。
+  # 三个桌面平台并行做类型检查，确保「在别的 OS 上编不过」不会拖到发版才暴露。
   check:
     name: 快检 / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -29,15 +30,27 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
       - name: Linux 系统依赖
         if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev pkg-config cmake nasm
+          sudo apt-get install -y libasound2-dev libpulse-dev pkg-config cmake nasm
 
       - name: Windows 依赖
         if: matrix.os == 'windows-latest'
         run: choco install nasm -y --no-progress
+
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile || pnpm install
 
       - name: 格式检查
         if: matrix.os == 'ubuntu-22.04'
@@ -48,3 +61,72 @@ jobs:
 
       - name: 单元测试
         run: cargo test --workspace
+
+      - name: 前端类型检查
+        run: pnpm exec tsc --noEmit
+
+  # 端到端链路：不需要声卡，用真实 UDP 回环验证编解码与混音。
+  e2e:
+    name: 端到端链路
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libpulse-dev pkg-config cmake nasm
+      - name: 音频内核回环
+        run: cargo run -q -p kanami-audio --example loopback
+      - name: UDP 端到端
+        run: cargo run -q -p kanami-net --example e2e
+
+  # 发版时才跑全量打包，避免每次改一行都要等二十分钟。
+  bundle:
+    name: 打包 / ${{ matrix.os }}
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    needs: [check]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            args: ""
+          - os: windows-latest
+            args: ""
+          - os: macos-latest
+            args: "--target universal-apple-darwin"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Linux 系统依赖
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libpulse-dev pkg-config cmake nasm \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Windows 依赖
+        if: matrix.os == 'windows-latest'
+        run: choco install nasm -y --no-progress
+
+      - run: pnpm install --frozen-lockfile || pnpm install
+
+      - uses: tauri-apps/tauri-action@v0
+        with:
+          args: ${{ matrix.args }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

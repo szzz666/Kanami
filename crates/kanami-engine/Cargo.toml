@@ -1,0 +1,19 @@
+[package]
+name = "kanami-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kanami-proto.workspace = true
+kanami-audio.workspace = true
+kanami-net.workspace = true
+cpal.workspace = true
+rubato.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+env_logger.workspace = true

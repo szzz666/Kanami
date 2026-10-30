@@ -6,3 +6,10 @@ rust-version.workspace = true
 
 [dependencies]
 kanami-proto.workspace = true
+rubato.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+# Opus 走 C 库（audiopus_sys），四端共用同一个实现，行为一致。
+# Android 交叉编译时 audiopus_sys 会自动用 NDK 的 clang 构建。
+opus.workspace = true

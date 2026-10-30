@@ -1,0 +1,211 @@
+//! 局域网设备发现。
+//!
+//! 三件套并行，因为实测证明没有哪一种单独够用：
+//!
+//! - **mDNS/DNS-SD**：标准做法，桌面端之间最可靠。
+//! - **UDP 广播**：mDNS 被路由器拦掉时的备胎。
+//! - **手动 IP**：实测模拟器上广播与组播双向都不通，
+//!   这种情况下唯一能用的就是手填地址。
+//!
+//! 每种方式发现的设备都进同一个设备表，按稳定设备 ID 去重。
+
+#![forbid(unsafe_code)]
+
+use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use kanami_proto::{QualityMode, Role};
+
+/// mDNS 服务类型。
+pub const SERVICE_TYPE: &str = "_kanami._udp.local.";
+/// 广播发现使用的固定端口。所有安装本应用的设备都监听它。
+pub const DISCOVERY_PORT: u16 = 47821;
+/// 广播间隔。
+pub const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2);
+/// 多久没听到某设备的广播就认为它下线了。
+pub const STALE_AFTER: Duration = Duration::from_secs(8);
+
+/// 一台被发现的对端设备。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerDevice {
+    /// 稳定设备标识，用于白名单与去重。
+    pub device_id: String,
+    pub name: String,
+    pub role: Role,
+    /// 音频端口。
+    pub audio_port: u16,
+    /// 信令端口。
+    pub signal_port: u16,
+    /// 该设备当前使用的模式。
+    pub mode: QualityMode,
+    /// 最后一次听到它的地址。
+    pub addr: SocketAddr,
+    /// 通过哪条途径发现的。
+    pub via: DiscoveredVia,
+    /// 最后一次听到它的时刻。
+    pub last_seen: Instant,
+}
+
+/// 发现途径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoveredVia {
+    Mdns,
+    Broadcast,
+    Manual,
+}
+
+impl DiscoveredVia {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Mdns => "mDNS",
+            Self::Broadcast => "广播",
+            Self::Manual => "手动添加",
+        }
+    }
+}
+
+/// 广播报文。用纯文本，方便用 nc 直接调试。
+///
+/// 格式：KANAMI1|device_id|name|role|audio_port|signal_port|mode
+fn encode_announce(d: &PeerDevice) -> Vec<u8> {
+    format!(
+        "KANAMI1|{}|{}|{}|{}|{}|{}",
+        d.device_id, d.name, d.role as u8, d.audio_port, d.signal_port, d.mode as u8
+    )
+    .into_bytes()
+}
+
+fn decode_announce(buf: &[u8], from: SocketAddr) -> Option<PeerDevice> {
+    let text = std::str::from_utf8(buf).ok()?;
+    let mut parts = text.split('|');
+    if parts.next()? != "KANAMI1" {
+        return None;
+    }
+    let device_id = parts.next()?.to_string();
+    let name = parts.next()?.to_string();
+    let role = Role::from_u8(parts.next()?.parse().ok()?)?;
+    let audio_port = parts.next()?.parse().ok()?;
+    let signal_port = parts.next()?.parse().ok()?;
+    let mode = QualityMode::from_u8(parts.next()?.parse().ok()?)?;
+
+    Some(PeerDevice {
+        device_id,
+        name,
+        role,
+        audio_port,
+        signal_port,
+        mode,
+        addr: SocketAddr::new(from.ip(), audio_port),
+        via: DiscoveredVia::Broadcast,
+        last_seen: Instant::now(),
+    })
+}
+
+/// 设备表。所有发现途径共用。
+#[derive(Debug, Default)]
+pub struct PeerTable {
+    peers: parking_lot::Mutex<HashMap<String, PeerDevice>>,
+}
+
+impl PeerTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 插入或更新一台设备。返回是否是首次发现。
+    pub fn upsert(&self, mut device: PeerDevice) -> bool {
+        let mut guard = self.peers.lock();
+        let is_new = !guard.contains_key(&device.device_id);
+        device.last_seen = Instant::now();
+        guard.insert(device.device_id.clone(), device);
+        is_new
+    }
+
+    /// 当前所有仍在线的设备。
+    pub fn list(&self) -> Vec<PeerDevice> {
+        let guard = self.peers.lock();
+        let now = Instant::now();
+        guard
+            .values()
+            // 手动添加的设备永不过期：用户明确指定了它，不该因为收不到广播就消失
+            .filter(|d| {
+                d.via == DiscoveredVia::Manual || now.duration_since(d.last_seen) < STALE_AFTER
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// 移除一台设备。
+    pub fn remove(&self, device_id: &str) -> bool {
+        self.peers.lock().remove(device_id).is_some()
+    }
+
+    pub fn get(&self, device_id: &str) -> Option<PeerDevice> {
+        self.peers.lock().get(device_id).cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.peers.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// 广播发现服务。
+pub struct Broadcaster {
+    socket: UdpSocket,
+    table: Arc<PeerTable>,
+    self_id: String,
+}
+
+impl Broadcaster {
+    /// 绑定发现端口并准备收发广播。
+    ///
+    /// 端口被占用时不报错返回 None——同一台机器上跑两个实例是常见情况
+    /// （比如桌面端 + 模拟器转发），不能因此整个应用起不来。
+    pub fn start(table: Arc<PeerTable>, self_id: String) -> std::io::Result<Option<Self>> {
+        let socket = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("发现端口 {DISCOVERY_PORT} 绑定失败：{e}，广播发现不可用");
+                return Ok(None);
+            }
+        };
+        socket.set_nonblocking(true)?;
+        let _ = socket.set_broadcast(true);
+        Ok(Some(Self { socket, table, self_id }))
+    }
+
+    /// 发出一次广播通告，并顺带收一轮别人的通告。
+    pub fn tick(&self, me: &PeerDevice) {
+        // 发给所有网段的广播地址 + 本地回环（同机多实例时能互相看到）
+        let payload = encode_announce(me);
+        let targets = [
+            SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, DISCOVERY_PORT)),
+        ];
+        for target in targets {
+            let _ = self.socket.send_to(&payload, target);
+        }
+
+        // 收一轮
+        let mut buf = [0u8; 1024];
+        for _ in 0..32 {
+            match self.socket.recv_from(&mut buf) {
+                Ok((n, from)) => {
+                    if let Some(device) = decode_announce(&buf[..n], from) {
+                        // 忽略自己
+                        if device.device_id != self.self_id {
+                            self.table.upsert(device);
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+}

@@ -3,6 +3,9 @@ resolver = "2"
 members = [
     "crates/kanami-proto",
     "crates/kanami-audio",
+    "crates/kanami-net",
+    "crates/kanami-engine",
+    "src-tauri",
 ]
 
 [workspace.package]
@@ -13,6 +16,22 @@ rust-version = "1.77"
 [workspace.dependencies]
 kanami-proto = { path = "crates/kanami-proto" }
 kanami-audio = { path = "crates/kanami-audio" }
+kanami-net = { path = "crates/kanami-net" }
+kanami-engine = { path = "crates/kanami-engine" }
+
+# 音频
+cpal = "0.16"
+opus = "0.4"
+rubato = "1.0"
+# 网络
+socket2 = "0.6"
+mdns-sd = "0.17"
+# 通用
+anyhow = "1"
+thiserror = "2"
+parking_lot = "0.12"
+log = "0.4"
+env_logger = "0.11"
 
 [profile.release]
 opt-level = 3
