@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  iOS 专属配置。Tauri 在 `tauri ios init` 生成工程后会读取这里的键。
+
+  这四条是 iOS 上下载了也跑不起来的关卡，缺一不可：
+
+  1. NSLocalNetworkUsageDescription
+     iOS 14 起，访问局域网必须先弹「本地网络」授权。
+     没有这条声明，mDNS 发现与 UDP 直连全部静默失败——
+     而且用户完全不知道发生了什么。
+
+  2. NSBonjourServices
+     声明要浏览的服务类型。不写的话 NSNetServiceBrowser
+     会直接返回错误，mDNS 发现不可用。
+
+  3. UIBackgroundModes: audio
+     不声明的话，锁屏约 30 秒后音频被系统掐断。
+     一个「当无线音箱用」的应用不能锁屏就断。
+
+  4. NSMicrophoneUsageDescription
+     iOS 拿不到系统输出，只能采麦克风，必须有这条。
+-->
+<plist version="1.0">
+<dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Kanami 需要访问本地网络，才能发现局域网内同样安装了本应用的设备并传输音频。</string>
+
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_kanami._udp</string>
+  </array>
+
+  <key>UIBackgroundModes</key>
+  <array>
+    <string>audio</string>
+  </array>
+
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Kanami 需要访问麦克风，才能把本机声音发送到局域网的其他设备。</string>
+
+  <key>UILaunchStoryboardName</key>
+  <string>LaunchScreen</string>
+</dict>
+</plist>

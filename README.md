@@ -71,7 +71,7 @@ src/               React 前端：桌面 antd / 移动 antd-mobile，共用业�
 | Windows | WASAPI loopback | Win11 22H2+ | 是 |
 | Linux | PulseAudio monitor | 是 | 是 |
 | Android | 仅麦克风（缺 REMOTE_SUBMIX） | 否 | 待补前台服务 |
-| iOS | 仅麦克风 | 否 | 未开始 |
+| iOS | 仅麦克风 | 否 | 配置已备，待 Xcode |
 
 ## 测试
 
