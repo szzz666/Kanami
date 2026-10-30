@@ -1,0 +1,18 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node / 前端
+node_modules/
+dist/
+.pnpm-store/
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# macOS
+.DS_Store
+
+# 本地自测产物
+*.log

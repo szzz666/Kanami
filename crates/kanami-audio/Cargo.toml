@@ -1,0 +1,8 @@
+[package]
+name = "kanami-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kanami-proto.workspace = true
