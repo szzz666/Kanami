@@ -47,6 +47,11 @@ pub struct AppState {
     pub mode: Mutex<QualityMode>,
     /// 已连接的对端（播放端视角）。
     pub connections: Mutex<HashMap<String, SocketAddr>>,
+    /// 下一个可用的 stream_id。
+    ///
+    /// 每接一路音源分配一个新号：混音台靠它区分来源，
+    /// 复用同一个号会让后接的那路盖掉前面的数据。
+    next_stream: AtomicU32,
     /// 手动添加的设备。
     pub manual_peers: Mutex<HashMap<String, SocketAddr>>,
     /// 上次广播时刻。
@@ -80,11 +85,23 @@ impl AppState {
             pending: Mutex::new(Vec::new()),
             mode: Mutex::new(QualityMode::Standard),
             connections: Mutex::new(HashMap::new()),
+            next_stream: AtomicU32::new(1),
             manual_peers: Mutex::new(HashMap::new()),
             last_announce: Mutex::new(None),
             started_at: Instant::now(),
             tick_count: AtomicU64::new(0),
         })
+    }
+
+    /// 分配一个新的 stream_id。从 1 开始，0 保留给控制消息。
+    pub fn next_stream_id(&self) -> u16 {
+        let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
+        // u16 用满后回绕到 1，跳过 0
+        if id == 0 || id > u16::MAX as u32 {
+            self.next_stream.store(2, Ordering::Relaxed);
+            return 1;
+        }
+        id as u16
     }
 
     /// 周期性维护。

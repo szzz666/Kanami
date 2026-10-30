@@ -130,3 +130,61 @@ impl Mixer {
 
 /// 多路混音器在同一时刻可接入的音源上限。
 pub const MAX_SOURCES: usize = 8;
+#[cfg(test)]
+mod multistream_tests {
+    use crate::mixer::{Mixer, MAX_SOURCES};
+
+    /// 多路音源必须能被独立区分。
+    ///
+    /// 这对应一个真实修过的 bug：播放端连接第二台音源时写死了
+    /// stream_id = 1，接收线程又总是投喂给「列表里第一个」，
+    /// 结果第二路的数据盖掉了第一路。
+    #[test]
+    fn 多路音源各自独立混音() {
+        let mut mixer = Mixer::new();
+        // 模拟三路音源，各自不同的 stream_id
+        for id in [1u16, 2, 3] {
+            assert!(mixer.add_source(id, MAX_SOURCES));
+        }
+        assert_eq!(mixer.source_count(), 3);
+
+        // 三路各自静音互不影响
+        mixer.source_mut(2).unwrap().muted = true;
+        assert!(!mixer.source(2).unwrap().muted == false);
+        assert!(mixer.source(2).unwrap().muted);
+        assert!(!mixer.source(1).unwrap().muted);
+        assert!(!mixer.source(3).unwrap().muted);
+
+        // 独奏第 3 路，前两路应当静音
+        mixer.source_mut(3).unwrap().solo = true;
+        assert!(mixer.any_solo());
+        let gain1 = mixer.source(1).unwrap().effective_gain(true);
+        let gain3 = mixer.source(3).unwrap().effective_gain(true);
+        assert_eq!(gain1, 0.0, "独奏时其他路必须闭嘴");
+        assert!(gain3 > 0.0, "独奏的那一路必须出声");
+    }
+
+    /// 同一路重复加入不能被算成两路。
+    #[test]
+    fn 重复的_stream_id_不会占两个位置() {
+        let mut mixer = Mixer::new();
+        for _ in 0..10 {
+            mixer.add_source(7, MAX_SOURCES);
+        }
+        assert_eq!(mixer.source_count(), 1);
+    }
+
+    /// 移除其中一路不能影响其他路。
+    #[test]
+    fn 移除一路不影响其他路() {
+        let mut mixer = Mixer::new();
+        for id in [1u16, 2, 3] {
+            mixer.add_source(id, MAX_SOURCES);
+        }
+        assert!(mixer.remove_source(2).is_some());
+        assert_eq!(mixer.source_count(), 2);
+        assert!(mixer.source(1).is_some());
+        assert!(mixer.source(3).is_some());
+        assert!(mixer.source(2).is_none());
+    }
+}

@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 
+use kanami_audio::mixer::MAX_SOURCES;
 use kanami_engine::engine::{IncomingSource, Outgoing};
 use kanami_engine::platform;
 use kanami_net::audio_socket::AudioSocket;
@@ -269,8 +270,22 @@ pub fn remove_peer(state: State<'_, AppState>, device_id: String) -> bool {
 /// 播放端：连接一台音源设备并开始接收。
 #[tauri::command]
 pub fn connect_to_peer(state: State<'_, AppState>, device_id: String) -> Result<(), String> {
+    // 幂等：已经在收这台设备就不重复连
+    if state.connections.lock().contains_key(&device_id) {
+        return Err("已经连接到这台设备了".into());
+    }
+
     let peer = state.peers.get(&device_id).ok_or("设备不在列表里")?;
     let mode = *state.mode.lock();
+
+    // 分配一个独立的 stream_id。
+    //
+    // 这个号必须每路不同：混音台按 stream_id 区分音源，
+    // 写死成 1 的话第二路会盖掉第一路的数据。
+    let stream_id = state.next_stream_id();
+    if state.engine.incoming.lock().len() >= MAX_SOURCES {
+        return Err(format!("同时接入的音源已达上限 {MAX_SOURCES} 路"));
+    }
 
     // 信令连接：播放端主动发起
     let signal_addr = SocketAddr::new(peer.addr.ip(), peer.signal_port);
@@ -285,8 +300,8 @@ pub fn connect_to_peer(state: State<'_, AppState>, device_id: String) -> Result<
         signaling::join_source(signal_addr, &hello, std::time::Duration::from_secs(5))
             .map_err(|e| format!("连接失败：{e}"))?;
 
-    // 建立接收通道
-    let socket = AudioSocket::bind(0, 1).map_err(|e| e.to_string())?;
+    // 建立接收通道，绑定这个流自己的 stream_id
+    let socket = AudioSocket::bind(0, stream_id).map_err(|e| e.to_string())?;
     let audio_addr = SocketAddr::new(peer.addr.ip(), accept.audio_port);
     socket.set_peer(audio_addr);
 
@@ -296,23 +311,28 @@ pub fn connect_to_peer(state: State<'_, AppState>, device_id: String) -> Result<
         .send(kanami_proto::PacketKind::Hello, 0, 0, &[])
         .map_err(|e| format!("握手失败：{e}"))?;
 
-    let source =
-        IncomingSource::new(1, accept.device_id.clone(), accept.device_name.clone(), accept.mode);
-    state.engine.add_source(source);
-    state.connections.lock().insert(device_id, audio_addr);
+    let source = IncomingSource::new(
+        stream_id,
+        accept.device_id.clone(),
+        accept.device_name.clone(),
+        accept.mode,
+    );
+    if !state.engine.add_source(source) {
+        return Err("加入混音台失败".into());
+    }
+    state.connections.lock().insert(device_id.clone(), audio_addr);
 
-    // 接收线程
-    let socket_arc = std::sync::Arc::new(socket);
+    // 接收线程：按 stream_id 精确投递到对应那一路，
+    // 不能写 first_mut()——那样所有音源的数据会挤进同一路。
     let engine = std::sync::Arc::clone(&state.engine);
-    let sock = std::sync::Arc::clone(&socket_arc);
     std::thread::Builder::new()
-        .name("kanami-rx".into())
+        .name(format!("kanami-rx-{stream_id}"))
         .spawn(move || loop {
-            match sock.try_recv() {
+            match socket.try_recv() {
                 Ok(Some((header, payload, _))) => {
                     if header.kind.is_audio() {
                         let mut list = engine.incoming.lock();
-                        if let Some(s) = list.first_mut() {
+                        if let Some(s) = list.iter_mut().find(|s| s.stream_id == stream_id) {
                             s.on_packet(header.seq, header.timestamp_ms, payload);
                         }
                     }
@@ -323,14 +343,24 @@ pub fn connect_to_peer(state: State<'_, AppState>, device_id: String) -> Result<
         })
         .map_err(|e| e.to_string())?;
 
+    log::info!("已连接 {device_id}，stream_id={stream_id}");
     Ok(())
 }
 
 #[tauri::command]
 pub fn disconnect_peer(state: State<'_, AppState>, device_id: String) -> bool {
-    let removed = state.connections.lock().remove(&device_id);
-    state.engine.remove_source(1);
-    removed.is_some()
+    let Some(addr) = state.connections.lock().remove(&device_id) else {
+        return false;
+    };
+    // 按对端地址找到对应那一路并移除，而不是盲目移除第一路
+    let stream_id =
+        state.engine.incoming.lock().iter().find(|s| s.device_id == device_id).map(|s| s.stream_id);
+    if let Some(id) = stream_id {
+        state.engine.remove_source(id);
+    } else {
+        let _ = addr;
+    }
+    true
 }
 
 /// 本机信息：给用户看「让别人连我该填什么」。
