@@ -123,3 +123,99 @@ impl OpusDecoder {
         }
     }
 }
+#[cfg(test)]
+mod codec_tests {
+    use super::*;
+
+    /// 编解码保真度。
+    ///
+    /// Opus 有固定的算法延迟（约 6.5ms 预滚 + 重采样器延迟），
+    /// 所以输出相对输入会有几十到几百个样本的位移。
+    /// 判据用皮尔逊相关系数：它对幅度与偏移都鲁棒，
+    /// 内容保真时应当接近 1.0，内容损坏时会明显掉下来。
+    fn fidelity(mode: kanami_proto::QualityMode) -> f64 {
+        let params = mode.params();
+        let frames = 50;
+        let frame_samples = params.samples_per_frame();
+        let total = frames * frame_samples;
+
+        // 复合信号：多个正弦叠加，避免单一频率在偏移搜索下产生误匹配
+        let mut src = Vec::with_capacity(total * CHANNELS);
+        for i in 0..total {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            let v = (t * 440.0 * std::f32::consts::TAU).sin() * 0.3
+                + (t * 733.0 * std::f32::consts::TAU).sin() * 0.2
+                + (t * 1211.0 * std::f32::consts::TAU).sin() * 0.1;
+            src.push(v);
+            src.push(v);
+        }
+
+        let mut enc = OpusEncoder::new(params).expect("编码器");
+        let mut dec = OpusDecoder::new(frame_samples).expect("解码器");
+        let mut out = Vec::new();
+        for chunk in src.chunks(frame_samples * CHANNELS) {
+            if chunk.len() < frame_samples * CHANNELS {
+                break;
+            }
+            let enc_bytes = enc.encode(chunk).expect("编码");
+            out.extend(dec.decode(&enc_bytes));
+        }
+
+        // 在已知的 Opus 延迟范围内搜索最佳对齐
+        let mut best = f64::NEG_INFINITY;
+        for offset in 0..1500isize {
+            let n = out.len().min(src.len());
+            let mut sx = 0.0f64;
+            let mut sy = 0.0f64;
+            let mut sxy = 0.0f64;
+            let mut sxx = 0.0f64;
+            let mut syy = 0.0f64;
+            let mut count = 0usize;
+            for (i, &src_sample) in src.iter().enumerate().take(n / 2) {
+                let j = i as isize + offset;
+                if j < 0 || j as usize >= n {
+                    continue;
+                }
+                let x = f64::from(src_sample);
+                let y = f64::from(out[j as usize]);
+                sx += x;
+                sy += y;
+                sxy += x * y;
+                sxx += x * x;
+                syy += y * y;
+                count += 1;
+            }
+            if count < 100 {
+                continue;
+            }
+            let cnt = count as f64;
+            let num = sxy - sx * sy / cnt;
+            let den = ((sxx - sx * sx / cnt) * (syy - sy * sy / cnt)).sqrt();
+            if den > 1e-12 {
+                best = best.max(num / den);
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn opus_三档编码解码都保真() {
+        let mut results = Vec::new();
+        for mode in [
+            kanami_proto::QualityMode::Standard,
+            kanami_proto::QualityMode::LowLatency,
+            kanami_proto::QualityMode::HighQuality,
+        ] {
+            let r = fidelity(mode);
+            println!("{} 档相关系数 {r:.4}（{}bps）", mode.name(), mode.params().bitrate_bps);
+            results.push((mode, r));
+        }
+
+        for (mode, r) in &results {
+            // 阈值取 0.95：Opus 是有损压缩，三音和弦这类富含谐波的信号
+            // 在 96–256kbps 下相关系数大约 0.97–0.99。低于 0.95 才是真出了问题
+            // （静音、噪声、通道错位），而不是正常的有损损耗。
+            assert!(*r > 0.95, "{} 档相关系数只有 {r:.4}，音频内容未保真", mode.name());
+        }
+    }
+}
