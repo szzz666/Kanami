@@ -15,5 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audio_socket;
+pub mod clock;
+pub mod crypto;
 pub mod discovery;
 pub mod signaling;
