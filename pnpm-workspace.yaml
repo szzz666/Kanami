@@ -1,2 +1,8 @@
+# pnpm 12 起默认不执行依赖的安装脚本（供应链安全策略）。
+#
+# vite 依赖 esbuild，而 esbuild 的安装脚本负责下载并校验平台二进制；
+# 不执行的话构建会失败，CI 里 `pnpm install --frozen-lockfile`
+# 也会直接报 ERR_PNPM_IGNORED_BUILDS。这里显式放行必须的两个。
 allowBuilds:
-  esbuild: set this to true or false
+  esbuild: true
+  "@tauri-apps/cli": true
