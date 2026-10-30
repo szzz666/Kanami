@@ -257,12 +257,45 @@ fn dirs_config_dir() -> std::path::PathBuf {
     std::path::PathBuf::from("./kanami-data")
 }
 
+/// 取一个能让人认出来的设备名。
+///
+/// Android 上没有 hostname 可执行文件，直接调会失败并回退成
+/// 毫无辨识度的占位名（实测显示成了 "localhost"）。
+/// 移动端改用系统属性里的机型，桌面端仍然优先用主机名。
 fn hostname() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "Kanami 设备".into())
+    #[cfg(target_os = "android")]
+    {
+        // ro.product.model 通常是 "SM-G998B" 这类机型名，比主机名更有辨识度
+        for prop in ["ro.product.model", "ro.product.device", "ro.product.name"] {
+            if let Ok(output) = std::process::Command::new("getprop").arg(prop).output() {
+                if let Ok(text) = String::from_utf8(output.stdout) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        return format!("Android {trimmed}");
+                    }
+                }
+            }
+        }
+        return "Android 设备".into();
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        for cmd in ["hostname", "uname"] {
+            let mut command = std::process::Command::new(cmd);
+            if cmd == "uname" {
+                command.arg("-n");
+            }
+            if let Ok(output) = command.output() {
+                if let Ok(text) = String::from_utf8(output.stdout) {
+                    let trimmed = text.trim();
+                    // "localhost" 这种名字没有任何辨识度，等于没有
+                    if !trimmed.is_empty() && trimmed != "localhost" {
+                        return trimmed.to_string();
+                    }
+                }
+            }
+        }
+        "Kanami 设备".into()
+    }
 }
