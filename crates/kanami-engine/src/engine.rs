@@ -174,6 +174,8 @@ pub struct IncomingSource {
     /// 时钟同步器。同步之后才能算出真实的端到端延迟，
     /// 否则「延迟」只是本地缓冲时间，不是用户能感知的那个数。
     pub clock: parking_lot::Mutex<kanami_net::clock::ClockSync>,
+    /// 解密通道。None 表示对端是明文发送。
+    pub cipher: Option<parking_lot::Mutex<kanami_net::crypto::SecureChannel>>,
     /// 最近一帧的采集时刻（对端时钟，毫秒）。
     pub last_remote_ts: AtomicU32,
 }
@@ -196,7 +198,13 @@ impl IncomingSource {
             active: AtomicBool::new(true),
             clock: parking_lot::Mutex::new(kanami_net::clock::ClockSync::new()),
             last_remote_ts: AtomicU32::new(0),
+            cipher: None,
         }
+    }
+
+    /// 为这一路开启解密。必须与发送端的 PIN 和盐一致。
+    pub fn set_cipher(&mut self, channel: kanami_net::crypto::SecureChannel) {
+        self.cipher = Some(parking_lot::Mutex::new(channel));
     }
 
     /// 收到一包音频。
@@ -228,7 +236,19 @@ impl IncomingSource {
             Some(frame) => {
                 self.jitter.adapt();
                 self.buffer_ms.store(self.jitter.target_latency_ms(), Ordering::Relaxed);
-                Some(self.decoder.decode(&frame.payload))
+                // 对端开了加密就先解出 Opus 负载；解不开（PIN 不对）
+                // 就补一帧静音，不让整条链路因为一帧失败而停摆
+                let payload = match &self.cipher {
+                    Some(cipher) => match cipher.lock().open(&frame.payload) {
+                        Ok(plain) => plain,
+                        Err(e) => {
+                            log::warn!("解密失败（PIN 可能不匹配）：{e}");
+                            return Some(vec![0.0; self.decoder_frame_samples() * CHANNELS]);
+                        }
+                    },
+                    None => frame.payload,
+                };
+                Some(self.decoder.decode(&payload))
             }
             None => {
                 self.jitter.adapt();
@@ -240,6 +260,11 @@ impl IncomingSource {
 
     pub fn lost_count(&self) -> u64 {
         self.jitter.stats().lost
+    }
+
+    /// 单帧样本数（按当前模式）。
+    fn decoder_frame_samples(&self) -> usize {
+        self.mode.params().samples_per_frame()
     }
 }
 
@@ -253,6 +278,11 @@ pub struct Outgoing {
     seq: u32,
     /// 已编码发出的帧数。
     pub frames_sent: AtomicU64,
+    /// 加密通道。None 表示明文发送（默认）。
+    ///
+    /// 开启 PIN 配对后这里才有值：Opus 负载在发出前先加密，
+    /// 包头仍然明文，这样接收端不解密也能做丢包检测与延迟测量。
+    cipher: Option<kanami_net::crypto::SecureChannel>,
 }
 
 impl Outgoing {
@@ -265,7 +295,19 @@ impl Outgoing {
             pending: Vec::new(),
             seq: 0,
             frames_sent: AtomicU64::new(0),
+            cipher: None,
         })
+    }
+
+    /// 开启加密。传入由 PIN 与盐派生出的通道。
+    pub fn enable_encryption(&mut self, channel: kanami_net::crypto::SecureChannel) {
+        self.cipher = Some(channel);
+        log::info!("音频负载已启用加密");
+    }
+
+    /// 是否在加密发送。
+    pub fn is_encrypted(&self) -> bool {
+        self.cipher.is_some()
     }
 
     /// 喂入采集到的样本，凑够一帧就编一发。
@@ -277,7 +319,13 @@ impl Outgoing {
             let frame: Vec<f32> = self.pending.drain(..frame_samples).collect();
             match self.encoder.encode(&frame) {
                 Ok(encoded) => {
-                    let _ = self.socket.send(PacketKind::Audio, self.seq, timestamp_ms, &encoded);
+                    // 开了 PIN 配对就先加密负载再发。包头保持明文，
+                    // 接收端不解密也能做丢包检测与延迟测量。
+                    let payload = match &self.cipher {
+                        Some(cipher) => cipher.seal(self.seq, &encoded),
+                        None => encoded,
+                    };
+                    let _ = self.socket.send(PacketKind::Audio, self.seq, timestamp_ms, &payload);
                     self.seq = self.seq.wrapping_add(1);
                     self.frames_sent.fetch_add(1, Ordering::Relaxed);
                 }

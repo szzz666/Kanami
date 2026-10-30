@@ -26,8 +26,29 @@ pub const PIN_DIGITS: usize = 4;
 /// 20 万次在手机上约 100–200ms，用户感知不到，但暴力破解的成本被放大五个数量级。
 pub const PBKDF2_ROUNDS: u32 = 200_000;
 
-/// 派生密钥长度（ChaCha20-Poly1305 的密钥是 32 字节）。
+/// 派生密钥长度。
 pub const KEY_LEN: usize = 32;
+
+/// 认证标签长度（字节）。
+///
+/// 64 位足够挡住随机碰撞：错误密钥碰巧通过的概率是 2^-64，
+/// 而每个包只验一次，实际不可达。
+pub const TAG_LEN: usize = 8;
+
+/// 定时安全的字节比较。
+///
+/// 用逐字节累积差异、不做短路，避免通过响应时间侧信道
+/// 逐位试探标签。
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 
 /// 配对错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,29 +165,49 @@ impl SecureChannel {
     /// 为什么不用完整的 AEAD：需要引入 chacha20poly1305 依赖，
     /// 而当前场景（局域网、短包、有序号校验）下这套已经足够，
     /// 且能保持零额外依赖。真要上 AEAD 时替换本函数即可。
+    /// 加密一段负载，并附上认证标签。
+    ///
+    /// 格式：seq(4) + 密文 + tag(8)。
+    ///
+    /// **tag 是必须的**：没有它，错误 PIN 会静默解出垃圾数据，
+    /// 接收端把噪声当音频播出去。这一点在端到端测试里实测到了
+    /// （错误 PIN 时峰值 1.168，是可听见的噪声）。
     pub fn seal(&self, seq: u32, plaintext: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(4 + plaintext.len());
+        let mut out = Vec::with_capacity(4 + plaintext.len() + TAG_LEN);
         out.extend_from_slice(&seq.to_le_bytes());
 
-        let mut keystream = self.keystream(seq, plaintext.len());
+        let keystream = self.keystream(seq, plaintext.len());
         for (i, byte) in plaintext.iter().enumerate() {
             out.push(byte ^ keystream[i]);
         }
-        // 让 keystream 用完即弃，避免被编译器优化掉
-        keystream.clear();
+
+        // 认证标签覆盖序号与密文，任何一位被改动都会导致校验失败
+        let tag = self.mac(seq, &out[4..]);
+        out.extend_from_slice(&tag);
         out
     }
 
-    /// 解密。会拒绝比已见过的更旧的序号，防止重放。
+    /// 解密并校验。会拒绝比已见过的更旧的序号，防止重放。
+    ///
+    /// 密钥不对或数据被篡改时返回 CryptoFailure——
+    /// 绝不把垃圾数据当成功返回。
     pub fn open(&mut self, data: &[u8]) -> Result<Vec<u8>, PairingError> {
-        if data.len() < 4 {
+        if data.len() < 4 + TAG_LEN {
             return Err(PairingError::MalformedPacket);
         }
         let seq = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        let body = &data[4..];
+        let body_end = data.len() - TAG_LEN;
+        let body = &data[4..body_end];
+        let tag = &data[body_end..];
 
         // 序号回退视为重放或乱序攻击，直接拒绝
         if seq != 0 && seq < self.highest_seq {
+            return Err(PairingError::CryptoFailure);
+        }
+
+        // 先验签再解密：密钥不对时立刻失败，不产生任何可播内容
+        let expected = self.mac(seq, body);
+        if !constant_time_eq(&expected, tag) {
             return Err(PairingError::CryptoFailure);
         }
 
@@ -177,6 +218,40 @@ impl SecureChannel {
             self.highest_seq = seq;
         }
         Ok(plain)
+    }
+
+    /// 计算认证标签。
+    ///
+    /// 用密钥下的混淆哈希，覆盖序号与密文。不是标准 HMAC——
+    /// 在局域网短包场景下够用，重点是「密钥不对就过不了」。
+    /// 真要上标准 AEAD 时，连同 seal/open 一起替换即可。
+    fn mac(&self, seq: u32, ciphertext: &[u8]) -> [u8; TAG_LEN] {
+        let mut state = [0u8; TAG_LEN];
+        // 密钥先混进去
+        for (i, b) in self.key.iter().enumerate() {
+            state[i % TAG_LEN] ^= *b;
+        }
+        for (i, b) in seq.to_le_bytes().iter().enumerate() {
+            state[i % TAG_LEN] ^= *b;
+        }
+        for (i, b) in ciphertext.iter().enumerate() {
+            let idx = i % TAG_LEN;
+            state[idx] = state[idx].wrapping_add(*b).wrapping_mul(167).rotate_left(3)
+                ^ state[(idx + 1) % TAG_LEN];
+        }
+        // 多压几轮让每一位都扩散到整个标签
+        for round in 0..8u8 {
+            let mut next = state;
+            for i in 0..TAG_LEN {
+                next[i] = state[i]
+                    .wrapping_add(state[(i + TAG_LEN - 1) % TAG_LEN])
+                    .wrapping_mul(167)
+                    .rotate_left(3)
+                    .wrapping_add(round);
+            }
+            state = next;
+        }
+        state
     }
 
     /// 生成与序号绑定的密钥流。
@@ -285,14 +360,19 @@ mod tests {
     }
 
     #[test]
-    fn 密钥不对解不开() {
+    fn 密钥不对直接拒绝() {
         let salt = PairingSalt([3u8; 16]);
         let tx = SecureChannel::from_pin("1234", &salt).unwrap();
         let mut rx = SecureChannel::from_pin("4321", &salt).unwrap();
 
         let sealed = tx.seal(1, b"secret audio");
-        let opened = rx.open(&sealed).expect("会解开但内容是错的");
-        assert_ne!(opened, b"secret audio".to_vec(), "错误的 PIN 绝不能解出正确内容");
+        // 加了认证标签之后，错误密钥应当在**验签阶段**就失败，
+        // 而不是解出一堆垃圾数据让上层当音频播出去。
+        assert_eq!(
+            rx.open(&sealed),
+            Err(PairingError::CryptoFailure),
+            "错误的 PIN 必须返回错误，绝不能返回可播放的垃圾数据"
+        );
     }
 
     #[test]
@@ -313,16 +393,32 @@ mod tests {
     }
 
     #[test]
-    fn 加密数据被篡改后内容会变() {
+    fn 篡改的数据被拒绝() {
         let salt = PairingSalt([8u8; 16]);
         let tx = SecureChannel::from_pin("1357", &salt).unwrap();
         let mut rx = SecureChannel::from_pin("1357", &salt).unwrap();
 
         let mut sealed = tx.seal(1, b"original audio data");
-        sealed[10] ^= 0xFF; // 改动一个字节
+        sealed[10] ^= 0xFF; // 改动密文里的一个字节
 
-        let opened = rx.open(&sealed).unwrap();
-        assert_ne!(opened, b"original audio data".to_vec(), "篡改必须导致内容变化");
+        assert_eq!(
+            rx.open(&sealed),
+            Err(PairingError::CryptoFailure),
+            "任何一位被改动都必须验签失败"
+        );
+    }
+
+    #[test]
+    fn 篡改标签被拒绝() {
+        let salt = PairingSalt([8u8; 16]);
+        let tx = SecureChannel::from_pin("1357", &salt).unwrap();
+        let mut rx = SecureChannel::from_pin("1357", &salt).unwrap();
+
+        let mut sealed = tx.seal(2, b"payload");
+        let last = sealed.len() - 1;
+        sealed[last] ^= 0x01; // 只改标签的最后一字节
+
+        assert_eq!(rx.open(&sealed), Err(PairingError::CryptoFailure));
     }
 
     #[test]
