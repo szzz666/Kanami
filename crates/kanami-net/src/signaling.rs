@@ -210,14 +210,19 @@ impl SignalListener {
 
 /// 播放端：连上音源并发起接入请求，读出应答。
 pub fn join_source(addr: SocketAddr, hello: &Hello, timeout: Duration) -> io::Result<Accept> {
+    log::info!("[信令] 发起 TCP 连接 → {addr}");
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
+    log::info!("[信令] TCP 已建立");
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
 
-    Signal::new(SignalKind::Join, hello.encode().unwrap_or_default()).write_to(&mut stream)?;
+    let payload = hello.encode().unwrap_or_default();
+    Signal::new(SignalKind::Join, payload).write_to(&mut stream)?;
+    log::info!("[信令] 已发出 Join，等待应答");
 
     let reply = Signal::read_from(&mut stream)?;
+    log::info!("[信令] 收到应答：{:?}", reply.kind);
     match reply.kind {
         SignalKind::Accept => Accept::decode(&reply.payload)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "应答格式错误")),

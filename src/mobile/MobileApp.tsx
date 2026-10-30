@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { TabBar, Toast } from "antd-mobile";
+import { TabBar, NoticeBar } from "antd-mobile";
 import { SoundOutline, AudioOutline, SetOutline } from "antd-mobile-icons";
 import type { KanamiApi } from "../useKanami";
 import { S } from "../strings";
@@ -14,10 +14,13 @@ import MobileSettings from "./MobileSettings";
 export default function MobileApp({ k }: { k: KanamiApi }) {
   const [tab, setTab] = useState("send");
 
-  if (k.error) {
-    Toast.show({ icon: "fail", content: k.error });
-    k.clearError();
-  }
+  // 错误用常驻横幅而不是 Toast。
+  //
+  // Toast 有两个问题：在渲染体内调用是副作用（会被忽略），
+  // 而且几秒后自动消失——用户切个页面回来就再也看不到出了什么事。
+  // 实测：后端明确返回了「播放端尚未确认接入此音源」，
+  // 但界面上什么都没显示，看起来就像「点了没反应」。
+  // 改成常驻横幅，必须手动关闭。
 
   return (
     <div className="mobile-shell safe-top">
@@ -37,6 +40,16 @@ export default function MobileApp({ k }: { k: KanamiApi }) {
       </div>
 
       <div className="mobile-content">
+        {k.error && (
+          <NoticeBar
+            content={k.error}
+            color="error"
+            wrap
+            closeable
+            onClose={k.clearError}
+            style={{ marginBottom: 12 }}
+          />
+        )}
         {tab === "send" && <MobileSend k={k} />}
         {tab === "receive" && <MobileReceive k={k} />}
         {tab === "settings" && <MobileSettings k={k} />}

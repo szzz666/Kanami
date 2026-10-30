@@ -270,13 +270,25 @@ pub fn remove_peer(state: State<'_, AppState>, device_id: String) -> bool {
 /// 播放端：连接一台音源设备并开始接收。
 #[tauri::command]
 pub fn connect_to_peer(state: State<'_, AppState>, device_id: String) -> Result<(), String> {
+    // 命令入口就打日志：如果连这行都看不到，说明前端根本没调到这里，
+    // 排查方向就完全不同了。这一行是区分「UI 事件没触发」与
+    // 「后端逻辑失败」的分水岭。
+    log::info!("收到连接请求：device_id={device_id}");
+
     // 幂等：已经在收这台设备就不重复连
     if state.connections.lock().contains_key(&device_id) {
         return Err("已经连接到这台设备了".into());
     }
 
-    let peer = state.peers.get(&device_id).ok_or("设备不在列表里")?;
+    let peer = match state.peers.get(&device_id) {
+        Some(p) => p,
+        None => {
+            log::warn!("设备 {device_id} 不在列表里（可能是列表刷新的时机问题）");
+            return Err("设备不在列表里".into());
+        }
+    };
     let mode = *state.mode.lock();
+    log::info!("准备连接 {} → {}:{}", peer.name, peer.addr.ip(), peer.signal_port);
 
     // 分配一个独立的 stream_id。
     //
