@@ -30,9 +30,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # pnpm 必须先于 setup-node 装好。
-      # setup-node 的 cache: pnpm 会在自己那一步去查 pnpm store 的位置，
-      # pnpm 不在 PATH 上时这步直接失败，后面所有检查都会被跳过。
       - uses: pnpm/action-setup@v4
         with:
           version: 9
@@ -41,8 +38,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+
+      # 显式缓存 pnpm store，不用 setup-node 的 cache: pnpm。
+      # 那个选项要求 setup-node 自己去探测 pnpm store 路径，
+      # 在 pnpm 刚装好、还没跑过 install 的情况下探测会失败，
+      # 整个 job 会在这一步直接挂掉——这是实测踩到的。
+      - name: 缓存 pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
 
       - name: Linux 系统依赖
         if: matrix.os == 'ubuntu-22.04'
@@ -116,8 +122,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
+
+      - name: 缓存 pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
 
       - name: Linux 系统依赖
         if: matrix.os == 'ubuntu-22.04'
