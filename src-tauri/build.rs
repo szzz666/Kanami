@@ -6,7 +6,11 @@
 // 顺序很重要：tauri_build::build() 会立刻校验 tauri.conf.json 里声明的
 // 资源是否存在，所以助手必须先编译并落盘，再调用它。
 
+// 这些导入只在 macOS 分支用到，其他平台会触发 unused_imports，
+// 而 CI 的 clippy 带 -D warnings，必须按平台隔离。
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 fn main() {
@@ -17,6 +21,9 @@ fn main() {
 }
 
 /// 编译 Swift 采集助手并复制到 resources 目录。
+///
+/// 只有 macOS 需要；其他平台是空实现，但函数本身要保留，
+/// 这样 main 里不用写 cfg 分支。
 #[cfg(target_os = "macos")]
 fn stage_capture_helper() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -61,4 +68,8 @@ fn stage_capture_helper() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn stage_capture_helper() {}
+fn stage_capture_helper() {
+    // 非 macOS 平台没有系统音频采集助手这回事：
+    // Windows 走 WASAPI loopback、Linux 走 PulseAudio monitor，
+    // 都不需要外部进程。
+}
