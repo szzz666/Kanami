@@ -106,7 +106,10 @@ export default function MobileReceive({ k }: { k: KanamiApi }) {
         ) : (
           <List>
             {sources.map((s) => (
-              <List.Item key={s.stream_id} description={`${s.mode} · 缓冲 ${s.buffer_ms}ms`}>
+              <List.Item
+                key={s.stream_id}
+                description={`${s.mode} · 缓冲 ${s.buffer_ms}ms · 延迟 ${s.synced ? `${s.latency_ms}ms` : "同步中"}`}
+              >
                 <div style={{ width: "100%" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span className={s.active ? "source-active" : "source-idle"} />

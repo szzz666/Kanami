@@ -61,6 +61,10 @@ export interface IncomingSourceDto {
   packets: number;
   lost: number;
   buffer_ms: number;
+  /** 端到端延迟（毫秒）。-1 表示时钟尚未同步。 */
+  latency_ms: number;
+  /** 时钟是否已同步。未同步时 latency_ms 不可信。 */
+  synced: boolean;
   active: boolean;
 }
 

@@ -47,8 +47,16 @@ export default function ReceivePanel({ k }: { k: KanamiApi }) {
                 <div className="mixer-name">
                   <div>{s.name}</div>
                   <div className="mixer-meta">
-                    {s.mode} · 缓冲 <span className="latency-value">{s.buffer_ms}ms</span> ·
-                    包 {s.packets} · 丢 {s.lost}
+                    {s.mode} · 缓冲 <span className="latency-value">{s.buffer_ms}ms</span>
+                    {" · "}
+                    {/* 端到端延迟要时钟同步之后才有意义，没同步时如实显示 */}
+                    延迟{" "}
+                    {s.synced ? (
+                      <span className="latency-value">{s.latency_ms}ms</span>
+                    ) : (
+                      <span style={{ color: "#86909c" }}>同步中</span>
+                    )}
+                    {" · "}包 {s.packets} · 丢 {s.lost}
                   </div>
                 </div>
                 <Slider

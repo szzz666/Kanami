@@ -171,6 +171,11 @@ pub struct IncomingSource {
     pub buffer_ms: AtomicU32,
     /// 本轮是否供上了数据。
     pub active: AtomicBool,
+    /// 时钟同步器。同步之后才能算出真实的端到端延迟，
+    /// 否则「延迟」只是本地缓冲时间，不是用户能感知的那个数。
+    pub clock: parking_lot::Mutex<kanami_net::clock::ClockSync>,
+    /// 最近一帧的采集时刻（对端时钟，毫秒）。
+    pub last_remote_ts: AtomicU32,
 }
 
 impl IncomingSource {
@@ -189,13 +194,32 @@ impl IncomingSource {
             lost: AtomicU64::new(0),
             buffer_ms: AtomicU32::new(params.jitter_min_ms),
             active: AtomicBool::new(true),
+            clock: parking_lot::Mutex::new(kanami_net::clock::ClockSync::new()),
+            last_remote_ts: AtomicU32::new(0),
         }
     }
 
     /// 收到一包音频。
     pub fn on_packet(&mut self, seq: u32, timestamp_ms: u32, payload: Vec<u8>) {
         self.packets.fetch_add(1, Ordering::Relaxed);
+        // 记下来用于延迟测量：有了对端的采集时刻，
+        // 配合时钟偏移就能换算成本机时间轴上的延迟。
+        self.last_remote_ts.store(timestamp_ms, Ordering::Relaxed);
         self.jitter.push(Frame { seq, timestamp_ms, payload });
+    }
+
+    /// 用一次 Ping-Pong 结果更新时钟偏移。
+    pub fn update_clock(&self, t1: i64, t2: i64, t3: i64, t4: i64) {
+        self.clock.lock().add(kanami_net::clock::OffsetSample::from_ping_pong(t1, t2, t3, t4));
+    }
+
+    /// 当前端到端延迟。未同步时返回 None。
+    pub fn latency_ms(&self, now_local_ms: i64) -> Option<i64> {
+        let remote = i64::from(self.last_remote_ts.load(Ordering::Relaxed));
+        if remote == 0 {
+            return None;
+        }
+        self.clock.lock().latency_ms(now_local_ms, remote)
     }
 
     /// 取一帧解码结果。没有可播的数据时返回 None。

@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -59,6 +59,12 @@ pub struct AppState {
     /// 统计。
     pub started_at: Instant,
     pub tick_count: AtomicU64,
+    /// 播放器线程是否已启动。
+    ///
+    /// 播放器本身（cpal Stream）不能放进这里：它是 !Send，
+    /// 而 Tauri 的 managed state 要求 Send + Sync。
+    /// 所以播放器活在自己的线程里，这里只留一个标志。
+    pub player_started: AtomicBool,
 }
 
 impl AppState {
@@ -90,6 +96,7 @@ impl AppState {
             last_announce: Mutex::new(None),
             started_at: Instant::now(),
             tick_count: AtomicU64::new(0),
+            player_started: AtomicBool::new(false),
         })
     }
 
@@ -134,6 +141,14 @@ impl AppState {
 
         // 信令接入
         self.accept_signals();
+
+        // 发送泵：把采集到的样本喂给编码器并发 UDP。
+        // 不调这一步的话采集回调拿到的数据只是躺在环形缓冲里，
+        // 一个包都不会发出去——整条发送链路等于没接通。
+        if self.engine.outgoing.lock().is_some() {
+            let now_ms = self.started_at.elapsed().as_millis() as u32;
+            crate::pump_capture(self.engine.as_ref(), now_ms);
+        }
 
         // 混音节拍：主循环 20ms 一轮，正好是标准档一帧。
         // 真正的出声时刻由 cpal 按设备时钟拉取，这里只负责把解码结果
@@ -195,12 +210,17 @@ impl AppState {
     /// 当前状态快照，推给前端。
     pub fn status_snapshot(&self) -> serde_json::Value {
         let engine_status = self.engine.status();
+        let now_local = self.started_at.elapsed().as_millis() as i64;
+
         let sources: Vec<serde_json::Value> = self
             .engine
             .incoming
             .lock()
             .iter()
             .map(|s| {
+                // 端到端延迟需要时钟同步才有意义。未同步时给 -1，
+                // 前端据此显示「同步中」而不是一个假的数字。
+                let latency = s.latency_ms(now_local).unwrap_or(-1);
                 serde_json::json!({
                     "stream_id": s.stream_id,
                     "device_id": s.device_id,
@@ -209,6 +229,8 @@ impl AppState {
                     "packets": s.packets.load(Ordering::Relaxed),
                     "lost": s.lost_count(),
                     "buffer_ms": s.buffer_ms.load(Ordering::Relaxed),
+                    "latency_ms": latency,
+                    "synced": latency >= 0,
                     "active": s.active.load(Ordering::Relaxed),
                 })
             })
