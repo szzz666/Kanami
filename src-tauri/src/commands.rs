@@ -344,6 +344,11 @@ pub fn connect_to_peer(state: State<'_, AppState>, device_id: String) -> Result<
         .map_err(|e| e.to_string())?;
 
     log::info!("已连接 {device_id}，stream_id={stream_id}");
+
+    // Android：开前台服务，否则锁屏后音频线程会被系统冻结
+    #[cfg(target_os = "android")]
+    crate::playback_service::start(&format!("正在接收 {}", accept.device_name));
+
     Ok(())
 }
 
@@ -360,6 +365,13 @@ pub fn disconnect_peer(state: State<'_, AppState>, device_id: String) -> bool {
     } else {
         let _ = addr;
     }
+
+    // 没有任何音源了就把前台服务停掉，别让通知栏一直挂着
+    #[cfg(target_os = "android")]
+    if state.engine.incoming.lock().is_empty() {
+        crate::playback_service::stop();
+    }
+
     true
 }
 

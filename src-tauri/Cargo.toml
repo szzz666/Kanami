@@ -34,3 +34,11 @@ tauri = { version = "2", features = ["tray-icon"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "android", target_os = "ios"))'.dependencies]
 cpal.workspace = true
+# Android 专属：通过 JNI 调 Kotlin 侧的前台服务。
+# 放在 target 段里，桌面构建完全不会引入这些依赖。
+[target.'cfg(target_os = "android")'.dependencies]
+# 用 0.21 而不是 0.22：0.22 把 JNIEnv 拆成了 Env/EnvUnowned，
+# attach_current_thread 变成回调式 API，而我们只需要最简单的
+# 「附加线程 → 调一个静态方法 → 分离」，0.21 的 API 直接对应这个用法。
+jni = "0.21"
+ndk-context = "0.1"

@@ -4,13 +4,19 @@
 //! 把引擎状态推给前端、管理窗口与托盘。
 //! 所有音频逻辑都在 kanami-engine，这里不写业务。
 
-#![forbid(unsafe_code)]
+// 全局禁止 unsafe，但用 deny 而不是 forbid：
+// forbid 无法被子模块覆盖，而 Android 的 JNI 桥必须用 unsafe
+// （把原始指针转成 JavaVM/Context 没有安全抽象）。
+// deny 允许 playback_service 模块单独 allow，且每处都写了安全不变量。
+#![deny(unsafe_code)]
 
 use std::time::Duration;
 
 use tauri::Manager;
 
 mod commands;
+#[cfg(target_os = "android")]
+mod playback_service;
 mod state;
 #[cfg(desktop)]
 mod tray;
