@@ -150,7 +150,6 @@ mod multistream_tests {
 
         // 三路各自静音互不影响
         mixer.source_mut(2).unwrap().muted = true;
-        assert!(!mixer.source(2).unwrap().muted == false);
         assert!(mixer.source(2).unwrap().muted);
         assert!(!mixer.source(1).unwrap().muted);
         assert!(!mixer.source(3).unwrap().muted);
