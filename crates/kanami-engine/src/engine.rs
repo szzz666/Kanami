@@ -202,6 +202,26 @@ impl IncomingSource {
         }
     }
 
+    /// 切换这一路的音质模式。
+    ///
+    /// 抖动缓冲和帧长都随模式变化：低延迟档的缓冲只有 20ms，
+    /// 标准档 40–120ms，高音质档 60–200ms。切了模式不重建缓冲，
+    /// 就会出现「选了低延迟但还是 40ms」——界面上的数字纹丝不动。
+    ///
+    /// 序号不重置：对端仍在用原来的序号连续发，重置缓冲只是
+    /// 丢掉已排队的帧，让新参数立刻生效。
+    pub fn set_mode(&mut self, mode: QualityMode) {
+        if mode == self.mode {
+            return;
+        }
+        let params = mode.params();
+        self.mode = mode;
+        self.jitter = JitterBuffer::new(params);
+        self.decoder = OpusDecoder::new(params.samples_per_frame()).expect("Opus 解码器初始化失败");
+        self.buffer_ms.store(params.jitter_min_ms, Ordering::Relaxed);
+        log::info!("接收模式切换为 {}", mode.name());
+    }
+
     /// 为这一路开启解密。必须与发送端的 PIN 和盐一致。
     pub fn set_cipher(&mut self, channel: kanami_net::crypto::SecureChannel) {
         self.cipher = Some(parking_lot::Mutex::new(channel));
@@ -400,6 +420,16 @@ impl Engine {
         true
     }
 
+    /// 切换所有接收音源的模式。
+    ///
+    /// 播放端切模式时，每一路的抖动缓冲都要跟着重建——
+    /// 否则界面上选了「低延迟」，实际缓冲还是标准档的 40–120ms。
+    pub fn set_receive_mode(&self, mode: QualityMode) {
+        for source in self.incoming.lock().iter_mut() {
+            source.set_mode(mode);
+        }
+    }
+
     /// 移除一路接收音源。
     pub fn remove_source(&self, stream_id: u16) -> bool {
         self.mixer.lock().remove_source(stream_id);
@@ -458,7 +488,15 @@ impl Engine {
                 .map(|o| o.frames_sent.load(Ordering::Relaxed))
                 .unwrap_or(0),
             sample_rate: SAMPLE_RATE,
-            mode: outgoing.as_ref().map(|o| o.mode).unwrap_or_default(),
+            // 模式取「发送端」或「任一路接收」的。
+            //
+            // 原来只看 outgoing：播放端切换模式后，顶层 mode 永远是默认档，
+            // 界面上的模式按钮就跳回「标准」，看起来像切换失败。
+            mode: outgoing
+                .as_ref()
+                .map(|o| o.mode)
+                .or_else(|| incoming.first().map(|s| s.mode))
+                .unwrap_or_default(),
             output_latency_ms: incoming
                 .iter()
                 .map(|s| s.buffer_ms.load(Ordering::Relaxed))
@@ -513,3 +551,78 @@ pub fn pump_capture(engine: &Engine, timestamp_ms: u32) {
 
 /// 标准维护间隔。
 pub const TICK_INTERVAL: Duration = Duration::from_millis(5);
+
+#[cfg(test)]
+mod mode_switch_tests {
+    use super::*;
+
+    /// 播放端切模式必须让每一路的抖动缓冲跟着变。
+    ///
+    /// 这条测试锁住一个真实缺陷：set_mode 原来只重建发送端编码器，
+    /// 接收端完全没动。于是播放端选「低延迟」，混音台里的缓冲
+    /// 还是标准档的 40–120ms，界面上看着像切换没生效。
+    #[test]
+    fn 切模式会重建接收端缓冲() {
+        let engine = Engine::new();
+        for id in 1..=3u16 {
+            engine.add_source(IncomingSource::new(
+                id,
+                format!("dev{id}"),
+                format!("设备{id}"),
+                QualityMode::Standard,
+            ));
+        }
+
+        // 标准档的最小缓冲
+        let before = QualityMode::Standard.params().jitter_min_ms;
+        for s in engine.incoming.lock().iter() {
+            assert_eq!(s.mode, QualityMode::Standard);
+        }
+
+        engine.set_receive_mode(QualityMode::LowLatency);
+
+        let expect = QualityMode::LowLatency.params().jitter_min_ms;
+        assert_ne!(before, expect, "两档的缓冲下限本来就该不同，否则这条测试没意义");
+        for s in engine.incoming.lock().iter() {
+            assert_eq!(s.mode, QualityMode::LowLatency, "每一路都要切到新模式");
+            assert_eq!(s.buffer_ms.load(Ordering::Relaxed), expect, "缓冲水位必须立刻反映新模式");
+        }
+    }
+
+    /// 切到高音质档同样生效。
+    #[test]
+    fn 切到高音质也生效() {
+        let engine = Engine::new();
+        engine.add_source(IncomingSource::new(1, "d".into(), "设备".into(), QualityMode::Standard));
+        engine.set_receive_mode(QualityMode::HighQuality);
+        let s = engine.incoming.lock();
+        assert_eq!(s[0].mode, QualityMode::HighQuality);
+        assert_eq!(
+            s[0].buffer_ms.load(Ordering::Relaxed),
+            QualityMode::HighQuality.params().jitter_min_ms
+        );
+    }
+
+    /// 切到同一个模式应该是无害的空操作。
+    #[test]
+    fn 重复切同一档不出问题() {
+        let engine = Engine::new();
+        engine.add_source(IncomingSource::new(
+            1,
+            "d".into(),
+            "设备".into(),
+            QualityMode::LowLatency,
+        ));
+        engine.set_receive_mode(QualityMode::LowLatency);
+        engine.set_receive_mode(QualityMode::LowLatency);
+        assert_eq!(engine.incoming.lock()[0].mode, QualityMode::LowLatency);
+    }
+
+    /// 没有音源时切模式不能 panic。
+    #[test]
+    fn 没有音源时切模式安全() {
+        let engine = Engine::new();
+        engine.set_receive_mode(QualityMode::HighQuality);
+        assert!(engine.incoming.lock().is_empty());
+    }
+}

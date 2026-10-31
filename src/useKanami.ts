@@ -237,16 +237,29 @@ export function useKanami() {
     return () => unlisten?.();
   }, [setError]);
 
+  const pullStatus = useCallback(async () => {
+    try {
+      const status = await api.status();
+      if (!mounted.current) return;
+      setState((prev) => ({ ...prev, status, mode: status.mode || prev.mode }));
+    } catch {
+      /* 后端还没起来时忽略 */
+    }
+  }, []);
+
   const setMode = useCallback(
     async (mode: string) => {
       try {
         await api.setMode(mode);
         patch({ mode });
+        // 模式影响每一路接收的缓冲水位，必须重新拉状态，
+        // 否则混音台里还显示上一档的「缓冲 40ms / 标准」。
+        await pullStatus();
       } catch (e) {
         setError(e);
       }
     },
-    [patch, setError],
+    [patch, setError, pullStatus],
   );
 
   const addPeerManual = useCallback(
@@ -279,15 +292,6 @@ export function useKanami() {
   /// 事件偶尔会丢失或只带部分字段，界面就会一直停在
   /// 「未在接收 / 0/8」，而后端其实已经有音源在跑。
   /// 每个会改变状态的操作之后都主动拉一次，事件只当锦上添花。
-  const pullStatus = useCallback(async () => {
-    try {
-      const status = await api.status();
-      if (!mounted.current) return;
-      setState((prev) => ({ ...prev, status, mode: status.mode || prev.mode }));
-    } catch {
-      /* 后端还没起来时忽略 */
-    }
-  }, []);
 
   const connectToPeer = useCallback(
     async (deviceId: string) => {

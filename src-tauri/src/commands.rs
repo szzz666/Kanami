@@ -163,9 +163,16 @@ pub fn set_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> 
 
     *state.mode.lock() = parsed;
 
+    // 发送端：重建编码器
     if let Some(outgoing) = state.engine.outgoing.lock().as_mut() {
         outgoing.set_mode(parsed).map_err(|e| format!("切换失败：{e}"))?;
     }
+    // 接收端：重建每一路的抖动缓冲与解码器
+    //
+    // 之前这里只处理了发送端。当本机是播放端时，切模式完全没效果——
+    // 界面上三档都选了「低延迟」，混音台里还是显示「缓冲 40ms」。
+    state.engine.set_receive_mode(parsed);
+    log::info!("模式切换为 {}", parsed.name());
     Ok(())
 }
 

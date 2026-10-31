@@ -24,6 +24,13 @@ use kanami_proto::{Hello, QualityMode, Role};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
+    // 每个实例用唯一 ID 与名字：设备表按 device_id 去重，
+    // 全都叫 test-source-001 的话，开三个实例只会看到一台，
+    // 根本没法测「一播放端多音源」。
+    let uid = format!("{:04x}", std::process::id() & 0xffff);
+    let self_id = format!("test-source-{uid}");
+    let self_name = format!("Mac 音源 {uid}");
+
     // 音源端的发送通道。端口要先定下来，Accept 里要通告它。
     let mut outgoing = Outgoing::new(AudioSocket::bind(0, 1)?, QualityMode::Standard)?;
     let audio_port = outgoing.socket.local_addr()?.port();
@@ -42,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 广播出去，让手机能在「设备」列表里直接看到，不用手填 IP
     let table = Arc::new(PeerTable::new());
-    let broadcaster = Broadcaster::start(Arc::clone(&table), "test-source-001".to_string())?;
+    let broadcaster = Broadcaster::start(Arc::clone(&table), self_id.clone())?;
     match &broadcaster {
         Some(_) => println!("✓ 广播已启动（每 2 秒一次）"),
         None => println!("⚠ 发现端口被占用，广播不可用——只能手动填 IP"),
@@ -53,6 +60,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let f = Arc::clone(&frames);
 
     // 发送线程：一旦学到对端就一直发正弦
+    //
+    // 只把广播要用的 id/name 的**副本** move 进线程，原件留给信令循环。
+    let bcast_id = self_id.clone();
+    let bcast_name = self_name.clone();
     let sender = std::thread::spawn(move || {
         let params = QualityMode::Standard.params();
         let frame_samples = params.samples_per_frame();
@@ -85,8 +96,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(b) = broadcaster.as_ref() {
                     log::info!("广播一次（音源 {} 信令 {}）", audio_port, signal_port);
                     b.tick(&PeerDevice {
-                        device_id: "test-source-001".into(),
-                        name: "Mac 测试音源".into(),
+                        device_id: bcast_id.clone(),
+                        name: bcast_name.clone(),
                         role: Role::Source,
                         audio_port,
                         signal_port,
@@ -131,8 +142,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let accept = Accept {
                                 mode: m,
                                 audio_port,
-                                device_name: "Mac 测试音源".into(),
-                                device_id: "test-source-001".into(),
+                                device_name: self_name.clone(),
+                                device_id: self_id.clone(),
                             };
                             match Signal::new(SignalKind::Accept, accept.encode())
                                 .write_to(&mut stream)
