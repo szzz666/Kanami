@@ -200,6 +200,17 @@ impl SignalListener {
         match self.listener.accept() {
             Ok((stream, addr)) => {
                 stream.set_nodelay(true)?;
+                // **必须显式调回阻塞模式。**
+                //
+                // Linux（含 Android）上 accept() 出来的 socket 会继承监听
+                // socket 的 O_NONBLOCK 标志；macOS 不会。于是同一段代码在
+                // Mac 上跑得好好的，到手机上就成了：连接建得起来、数据也
+                // 发出去了，但服务端 read_exact 立刻以 EAGAIN（os error 11）
+                // 失败，被上层当作「读取超时」丢掉——表现出来就是
+                // 「应用在跑，但谁都连不上」。
+                //
+                // 调回阻塞之后，上层设的 set_read_timeout 才真正生效。
+                stream.set_nonblocking(false)?;
                 Ok(Some((stream, addr)))
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
@@ -236,3 +247,143 @@ pub fn join_source(addr: SocketAddr, hello: &Hello, timeout: Duration) -> io::Re
 
 /// 播放端的角色常量，避免调用处写魔法值。
 pub const PLAYER_ROLE: Role = Role::Player;
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    /// 一个连上却不发数据的客户端，不能拖住 accept 循环。
+    ///
+    /// 这条测试锁住一个真实死锁：信令处理原来串在 20ms 主循环里，
+    /// 读包是阻塞的。端口扫描器、浏览器预连接、或者对端刚连上就崩溃，
+    /// 都会让主循环永久停在 read_exact 上——不再广播、不再收音频、
+    /// 不再推状态，界面看起来还活着，实际整个应用已经停摆。
+    #[test]
+    fn 哑巴连接不阻塞后续接入() {
+        let listener = SignalListener::bind(0).expect("绑定失败");
+        let port = listener.local_port().expect("取端口失败");
+
+        // 一个连上来但一个字都不发的客户端
+        let silent = TcpStream::connect(("127.0.0.1", port)).expect("连接失败");
+
+        // accept 必须立刻返回这个连接，而不是等它说话
+        let mut accepted = None;
+        for _ in 0..200 {
+            if let Ok(Some(pair)) = listener.try_accept() {
+                accepted = Some(pair);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (stream, _) = accepted.expect("应当能立刻 accept 到连接");
+
+        // 拿到了流，但读它会卡住——所以调用方必须设超时，
+        // 并且必须把读操作放到主循环之外。
+        stream.set_read_timeout(Some(Duration::from_millis(150))).expect("设超时失败");
+
+        let started = std::time::Instant::now();
+        let result = Signal::read_from(&mut { stream });
+        let waited = started.elapsed();
+
+        assert!(result.is_err(), "哑巴连接读不出信令，必须报错而不是无限等");
+        assert!(waited < Duration::from_secs(2), "读超时必须生效，实际等了 {waited:?}");
+
+        drop(silent);
+    }
+
+    /// 正常的一条信令，在设了超时之后依然能完整读出来。
+    #[test]
+    fn 设了超时不影响正常读取() {
+        let listener = SignalListener::bind(0).expect("绑定失败");
+        let port = listener.local_port().expect("取端口失败");
+
+        std::thread::spawn(move || {
+            let mut client = TcpStream::connect(("127.0.0.1", port)).expect("连接失败");
+            Signal::new(SignalKind::Leave, b"bye".to_vec())
+                .write_to(&mut client)
+                .expect("写入失败");
+            // 保持连接，模拟真实客户端
+            std::thread::sleep(Duration::from_millis(300));
+        });
+
+        let mut accepted = None;
+        for _ in 0..200 {
+            if let Ok(Some(pair)) = listener.try_accept() {
+                accepted = Some(pair);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (mut stream, _) = accepted.expect("应当能 accept");
+        stream.set_read_timeout(Some(Duration::from_secs(2))).expect("设超时失败");
+
+        let signal = Signal::read_from(&mut stream).expect("应当能读出信令");
+        assert_eq!(signal.kind, SignalKind::Leave);
+        assert_eq!(signal.payload, b"bye");
+    }
+
+    /// 写端必须把整帧一次写完，不能因为 Nagle 把头部和负载拆开。
+    #[test]
+    fn 信令帧能被完整写出() {
+        let mut buf = Vec::new();
+        let signal = Signal::new(SignalKind::Join, vec![1, 2, 3, 4]);
+        buf.write_all(&signal.encode()).expect("写入失败");
+        assert_eq!(buf.len(), 4 + 1 + 4, "长度前缀 4 + 类型 1 + 负载 4");
+        assert_eq!(u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize, 5);
+    }
+}
+
+#[cfg(test)]
+mod blocking_mode_tests {
+    use super::*;
+
+    /// accept 出来的流必须是阻塞的，否则设了超时也读不到数据。
+    ///
+    /// 这条测试锁住一个只在 Linux/Android 上出现的缺陷：
+    /// accept() 出来的 socket 会继承监听 socket 的 O_NONBLOCK，
+    /// 于是 read_exact 立刻返回 EAGAIN，被上层当成超时丢掉。
+    /// macOS 不继承这个标志，所以本地怎么测都是好的——
+    /// 只有真机上才暴露。
+    #[test]
+    fn 接受的连接是阻塞模式() {
+        let listener = SignalListener::bind(0).expect("绑定失败");
+        let port = listener.local_port().expect("取端口失败");
+
+        std::thread::spawn(move || {
+            let mut client = TcpStream::connect(("127.0.0.1", port)).expect("连接失败");
+            // 故意等一会儿再发：非阻塞模式下读会立刻失败，
+            // 阻塞模式下会老实等着。
+            std::thread::sleep(Duration::from_millis(250));
+            Signal::new(SignalKind::Leave, b"late".to_vec())
+                .write_to(&mut client)
+                .expect("写入失败");
+            std::thread::sleep(Duration::from_millis(400));
+        });
+
+        let mut accepted = None;
+        for _ in 0..200 {
+            if let Ok(Some(pair)) = listener.try_accept() {
+                accepted = Some(pair);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (mut stream, _) = accepted.expect("应当能 accept");
+
+        // 客户端要 250ms 后才发数据。设了 2 秒超时的阻塞读应当能等到；
+        // 如果流是非阻塞的，这里会立刻报 EAGAIN。
+        stream.set_read_timeout(Some(Duration::from_secs(2))).expect("设超时失败");
+        let started = std::time::Instant::now();
+        let signal = Signal::read_from(&mut stream).expect("应当等到延迟到达的信令");
+        let waited = started.elapsed();
+
+        assert_eq!(signal.kind, SignalKind::Leave);
+        assert_eq!(signal.payload, b"late");
+        assert!(
+            waited >= Duration::from_millis(150),
+            "必须真的等到了数据（实际 {waited:?}）；立刻返回说明流是非阻塞的"
+        );
+    }
+}

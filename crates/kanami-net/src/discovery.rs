@@ -168,7 +168,16 @@ impl Broadcaster {
     /// 端口被占用时不报错返回 None——同一台机器上跑两个实例是常见情况
     /// （比如桌面端 + 模拟器转发），不能因此整个应用起不来。
     pub fn start(table: Arc<PeerTable>, self_id: String) -> std::io::Result<Option<Self>> {
-        let socket = match UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) {
+        Self::start_on_port(table, self_id, DISCOVERY_PORT)
+    }
+
+    /// 绑定指定端口。传 0 让系统分配（诊断与多实例场景用）。
+    pub fn start_on_port(
+        table: Arc<PeerTable>,
+        self_id: String,
+        port: u16,
+    ) -> std::io::Result<Option<Self>> {
+        let socket = match UdpSocket::bind(("0.0.0.0", port)) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("发现端口 {DISCOVERY_PORT} 绑定失败：{e}，广播发现不可用");
@@ -207,5 +216,66 @@ impl Broadcaster {
                 Err(_) => break,
             }
         }
+    }
+}
+#[cfg(test)]
+mod announce_tests {
+    use super::*;
+
+    fn sample_peer() -> PeerDevice {
+        PeerDevice {
+            device_id: "abc-123".into(),
+            name: "测试设备".into(),
+            role: Role::Both,
+            audio_port: 51234,
+            signal_port: 52877,
+            mode: QualityMode::Standard,
+            addr: SocketAddr::from(([192, 168, 1, 10], 51234)),
+            via: DiscoveredVia::Broadcast,
+            last_seen: Instant::now(),
+        }
+    }
+
+    /// 广播报文必须完整带上两个端口。
+    ///
+    /// 这条测试是为了锁住一个真实 bug：signal_port 从未被赋值，
+    /// 广播出去的是 0，别的设备能发现你但永远连不上。
+    #[test]
+    fn 广播报文包含真实端口() {
+        let peer = sample_peer();
+        let bytes = encode_announce(&peer);
+        let from = SocketAddr::from(([192, 168, 1, 10], DISCOVERY_PORT));
+        let decoded = decode_announce(&bytes, from).expect("应当能解析");
+
+        assert_eq!(decoded.audio_port, 51234, "音频端口必须正确传递");
+        assert_eq!(decoded.signal_port, 52877, "信令端口必须正确传递");
+        assert_ne!(decoded.signal_port, 0, "信令端口为 0 意味着对端永远连不上");
+    }
+
+    #[test]
+    fn 端口为零时能解析但会被上层判定为不可用() {
+        let mut peer = sample_peer();
+        peer.signal_port = 0;
+        let bytes = encode_announce(&peer);
+        let from = SocketAddr::from(([192, 168, 1, 10], DISCOVERY_PORT));
+        let decoded = decode_announce(&bytes, from).expect("格式本身仍然合法");
+        // 解析层不拒绝 0，由使用方判断——这样诊断工具能看到原始值
+        assert_eq!(decoded.signal_port, 0);
+    }
+
+    #[test]
+    fn 拒绝格式错误的报文() {
+        let from = SocketAddr::from(([127, 0, 0, 1], 1000));
+        assert!(decode_announce(b"GARBAGE", from).is_none());
+        assert!(decode_announce(b"KANAMI1|only|three", from).is_none());
+    }
+
+    #[test]
+    fn 中文字符串不会破坏报文() {
+        let peer = sample_peer();
+        let bytes = encode_announce(&peer);
+        let from = SocketAddr::from(([127, 0, 0, 1], 1000));
+        let decoded = decode_announce(&bytes, from).expect("中文设备名应当能往返");
+        assert_eq!(decoded.name, "测试设备");
     }
 }

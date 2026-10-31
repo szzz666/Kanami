@@ -17,6 +17,12 @@ use kanami_proto::{Hello, QualityMode, Role};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
 
+/// 读一条信令的最大等待时间。
+///
+/// 信令帧很小，正常情况下一毫秒内就到齐了。给 2 秒是留足 Wi-Fi 抖动的余量，
+/// 同时保证一个哑巴客户端最多把主循环拖住 2 秒，而不是无限期。
+const SIGNAL_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// 播放端等待音源端确认的请求。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PendingRequest {
@@ -40,9 +46,12 @@ pub struct AppState {
     /// 信令监听器（作为音源端）。
     pub listener: Mutex<Option<SignalListener>>,
     /// 已授权可接入的播放端。
-    pub trusted: Mutex<HashSet<String>>,
+    ///
+    /// 用 Arc 包着是为了能交给信令线程：处理接入请求不能占用主循环，
+    /// 而线程需要 'static 的句柄。
+    pub trusted: Arc<Mutex<HashSet<String>>>,
     /// 等待用户确认的接入请求。
-    pub pending: Mutex<Vec<PendingRequest>>,
+    pub pending: Arc<Mutex<Vec<PendingRequest>>>,
     /// 当前模式。
     pub mode: Mutex<QualityMode>,
     /// 已连接的对端（播放端视角）。
@@ -75,8 +84,37 @@ impl AppState {
 
         let broadcaster = Broadcaster::start(Arc::clone(&peers), self_id.clone()).ok().flatten();
 
-        // 音源端信令监听：绑定 0 端口让系统分配
-        let listener = SignalListener::bind(0).ok();
+        // 音源端信令监听：绑定 0 端口让系统分配。
+        //
+        // 绑完必须把实际端口记下来，否则广播出去的是 0，
+        // 别的设备发现得到但你永远连不上——实测就是这个问题：
+        // 诊断探针看到「Android SM-G998B 音频端口=0 信令端口=0」。
+        // 绑定失败必须记日志，不能 .ok() 一吞了之——
+        // 那样信令端口会静默变成 0，广播出去后别人永远连不上，
+        // 而界面上看不出任何异常。
+        let listener = match SignalListener::bind(0) {
+            Ok(l) => Some(l),
+            Err(e) => {
+                log::error!("信令监听绑定失败：{e}（其他设备将无法连接本机）");
+                None
+            }
+        };
+        let signal_port = listener
+            .as_ref()
+            .and_then(|l| match l.local_port() {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    log::error!("取信令端口失败：{e}");
+                    None
+                }
+            })
+            .unwrap_or(0);
+
+        if signal_port == 0 {
+            log::error!("信令端口为 0，本机将无法被其他设备连接");
+        } else {
+            log::info!("信令监听端口 {signal_port}");
+        }
 
         Ok(Self {
             engine: Arc::new(Engine::new()),
@@ -85,10 +123,10 @@ impl AppState {
             self_id,
             self_name,
             audio_port: AtomicU32::new(0),
-            signal_port: AtomicU32::new(0),
+            signal_port: AtomicU32::new(u32::from(signal_port)),
             listener: Mutex::new(listener),
-            trusted: Mutex::new(HashSet::new()),
-            pending: Mutex::new(Vec::new()),
+            trusted: Arc::new(Mutex::new(HashSet::new())),
+            pending: Arc::new(Mutex::new(Vec::new())),
             mode: Mutex::new(QualityMode::Standard),
             connections: Mutex::new(HashMap::new()),
             next_stream: AtomicU32::new(1),
@@ -139,8 +177,8 @@ impl AppState {
             }
         }
 
-        // 信令接入
-        self.accept_signals();
+        // 信令接入（只做非阻塞 accept，真正的读包交给独立线程）
+        self.accept_signals(app);
 
         // 发送泵：把采集到的样本喂给编码器并发 UDP。
         // 不调这一步的话采集回调拿到的数据只是躺在环形缓冲里，
@@ -155,6 +193,17 @@ impl AppState {
         // 推进输出缓冲，两者速度不匹配时由环形缓冲吸收。
         self.engine.mix_once();
 
+        // 在发送 socket 上收一轮包。
+        //
+        // 这一步看着多余（音源端不是只管发吗），实际是整条链路的前提：
+        // AudioSocket::send 在 peer 为 None 时静默返回 Ok(false)，
+        // 而 peer 只能靠「从收到的包里学」——播放端连上来后会先发一个
+        // Hello 到这个端口。不在这里收，音源端永远学不到播放端地址，
+        // 编码照跑、序号照加，包却一个都没出去。
+        if let Some(out) = self.engine.outgoing.lock().as_ref() {
+            while let Ok(Some(_)) = out.socket.try_recv() {}
+        }
+
         // 保活
         if let Some(out) = self.engine.outgoing.lock().as_ref() {
             out.socket.maybe_keepalive();
@@ -166,43 +215,35 @@ impl AppState {
     }
 
     /// 接受音源端的接入请求。
-    fn accept_signals(&self) {
+    ///
+    /// 这里**只做非阻塞的 accept**，读包回包都丢给独立线程。
+    ///
+    /// 原因是实测出来的一个死锁：这个函数原来串在主循环里（20ms 一轮），
+    /// 而读信令是阻塞的。只要有一个客户端连上却不发数据——浏览器探活、
+    /// 端口扫描、或者对端在写之前就崩了——整个主循环就停在那里：
+    /// 不再广播（别的设备看不到本机）、不再收音频、不再推状态。
+    /// 表现出来就是「应用还在，但谁都连不上，界面数字全冻住」。
+    fn accept_signals(&self, _app: &AppHandle) {
         let guard = self.listener.lock();
         let Some(listener) = guard.as_ref() else { return };
 
-        while let Ok(Some((mut stream, addr))) = listener.try_accept() {
-            let Ok(signal) = Signal::read_from(&mut stream) else { continue };
+        while let Ok(Some((stream, addr))) = listener.try_accept() {
+            // 线程里要用到的状态先克隆出来。都是 Arc 或小字符串，
+            // 克隆很便宜，而且能避免把 &self 借进 'static 线程。
+            let info = SignalContext {
+                self_id: self.self_id.clone(),
+                self_name: self.self_name.clone(),
+                audio_port: self.audio_port.load(Ordering::Relaxed) as u16,
+                mode: *self.mode.lock(),
+                trusted: Arc::clone(&self.trusted),
+                pending: Arc::clone(&self.pending),
+            };
 
-            match signal.kind {
-                SignalKind::Join => {
-                    let Ok(hello) = Hello::decode(&signal.payload) else { continue };
-
-                    // 未授权：挂起等待用户确认
-                    if !self.trusted.lock().contains(&hello.device_id) {
-                        self.pending.lock().push(PendingRequest {
-                            device_id: hello.device_id.clone(),
-                            name: hello.device_name.clone(),
-                            addr: addr.to_string(),
-                        });
-                        let reason = RejectReason::NotTrusted;
-                        let _ = Signal::new(SignalKind::Reject, reason.code().as_bytes().to_vec())
-                            .write_to(&mut stream);
-                        continue;
-                    }
-
-                    let mode = *self.mode.lock();
-                    let accept = Accept {
-                        mode,
-                        audio_port: self.audio_port.load(Ordering::Relaxed) as u16,
-                        device_name: self.self_name.clone(),
-                        device_id: self.self_id.clone(),
-                    };
-                    let _ = Signal::new(SignalKind::Accept, accept.encode()).write_to(&mut stream);
-                }
-                SignalKind::Leave => {
-                    log::info!("播放端 {addr} 断开");
-                }
-                _ => {}
+            let spawned = std::thread::Builder::new()
+                .name("kanami-signal".into())
+                .spawn(move || handle_signal(stream, addr, &info));
+            if let Err(e) = spawned {
+                log::error!("信令线程启动失败：{e}");
             }
         }
     }
@@ -336,5 +377,80 @@ fn hostname() -> String {
             }
         }
         "Kanami 设备".into()
+    }
+}
+/// 处理一条接入请求所需的全部状态。
+///
+/// 单独打包是因为信令处理已经挪到独立线程：线程拿不到 &AppState
+/// （生命周期不够长），只能带一份克隆出来、'static 的上下文。
+struct SignalContext {
+    self_id: String,
+    self_name: String,
+    audio_port: u16,
+    mode: QualityMode,
+    trusted: Arc<Mutex<HashSet<String>>>,
+    pending: Arc<Mutex<Vec<PendingRequest>>>,
+}
+
+/// 在一个独立线程里读完一条信令并作出应答。
+///
+/// 独立线程的意义不只是并发——是**隔离**。读 TCP 是阻塞的，
+/// 放在主循环里等于把一个饿死的客户端变成整个应用的停机。
+fn handle_signal(mut stream: std::net::TcpStream, addr: SocketAddr, ctx: &SignalContext) {
+    let _ = stream.set_read_timeout(Some(SIGNAL_READ_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(SIGNAL_READ_TIMEOUT));
+
+    let signal = match Signal::read_from(&mut stream) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("来自 {addr} 的信令读取失败：{e}");
+            return;
+        }
+    };
+    log::info!("收到来自 {addr} 的信令：{:?}", signal.kind);
+
+    match signal.kind {
+        SignalKind::Join => {
+            let Ok(hello) = Hello::decode(&signal.payload) else {
+                log::warn!("来自 {addr} 的 Hello 解析失败");
+                return;
+            };
+            log::info!("播放端请求接入：{} [{}]", hello.device_name, hello.device_id);
+
+            // 未授权：挂起等待用户确认
+            if !ctx.trusted.lock().contains(&hello.device_id) {
+                let mut pending = ctx.pending.lock();
+                // 同一个设备重试多次时不重复堆积
+                if !pending.iter().any(|p| p.device_id == hello.device_id) {
+                    pending.push(PendingRequest {
+                        device_id: hello.device_id.clone(),
+                        name: hello.device_name.clone(),
+                        addr: addr.to_string(),
+                    });
+                }
+                drop(pending);
+
+                let reason = RejectReason::NotTrusted;
+                let _ = Signal::new(SignalKind::Reject, reason.code().as_bytes().to_vec())
+                    .write_to(&mut stream);
+                log::info!("回绝 {addr}：尚未在本机确认");
+                return;
+            }
+
+            let accept = Accept {
+                mode: ctx.mode,
+                audio_port: ctx.audio_port,
+                device_name: ctx.self_name.clone(),
+                device_id: ctx.self_id.clone(),
+            };
+            match Signal::new(SignalKind::Accept, accept.encode()).write_to(&mut stream) {
+                Ok(()) => log::info!("已接受 {addr}，通告音频端口 {}", ctx.audio_port),
+                Err(e) => log::warn!("应答 {addr} 失败：{e}"),
+            }
+        }
+        SignalKind::Leave => {
+            log::info!("播放端 {addr} 断开");
+        }
+        other => log::debug!("忽略信令 {other:?}"),
     }
 }

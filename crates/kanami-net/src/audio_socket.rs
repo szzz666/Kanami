@@ -235,3 +235,51 @@ pub fn local_ipv4_addrs() -> Vec<std::net::Ipv4Addr> {
     }
     out
 }
+
+#[cfg(test)]
+mod peer_learning_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// 没收到过包时，send 必须诚实地报告「没发出去」。
+    ///
+    /// 这条测试锁住一个真实缺陷：音源端从不调用 try_recv，
+    /// peer 永远是 None，send 静默返回 Ok(false)——编码器在跑、
+    /// 序号在涨、日志一片正常，实际一个包都没出去。
+    #[test]
+    fn 没有对端时发送返回未发出() {
+        let sock = AudioSocket::bind(0, 1).expect("绑定失败");
+        assert!(sock.peer().is_none());
+        let sent = sock.send(PacketKind::Audio, 0, 0, &[1, 2, 3]).expect("不该报错");
+        assert!(!sent, "没有对端时必须返回 false，不能假装发出去了");
+    }
+
+    /// 收到包之后必须学到对端，之后的发送才真的能出去。
+    #[test]
+    fn 收到包之后学会对端地址() {
+        let receiver = AudioSocket::bind(0, 1).expect("音源端绑定失败");
+        let sender = AudioSocket::bind(0, 2).expect("播放端绑定失败");
+
+        let target = receiver.local_addr().expect("取地址失败");
+        sender.set_peer(target);
+        let sent = sender.send(PacketKind::Hello, 0, 0, &[]).expect("发送失败");
+        assert!(sent, "播放端应当能发出握手包");
+
+        // 模拟 state.rs 主循环里那一轮收包
+        let mut got = None;
+        for _ in 0..200 {
+            if let Some(pkt) = receiver.try_recv().expect("收包失败") {
+                got = Some(pkt);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (header, _, from) = got.expect("音源端应当收到握手包");
+        assert_eq!(header.kind, PacketKind::Hello);
+        assert_eq!(receiver.peer(), Some(from), "必须从来源地址学到对端");
+
+        // 学到之后，音频才真的发得出去
+        let sent = receiver.send(PacketKind::Audio, 0, 0, &[9; 32]).expect("发送失败");
+        assert!(sent, "学到对端后音频必须能发出去");
+    }
+}
