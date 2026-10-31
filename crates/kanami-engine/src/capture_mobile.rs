@@ -391,6 +391,33 @@ fn start_system_audio(
         return Err(anyhow::anyhow!("无法请求系统声音采集授权"));
     }
 
-    log::info!("系统声音采集已请求，等待用户授权");
+    // 等采集真正跑起来再返回，而不是「弹了授权框就算成功」。
+    //
+    // 为什么：request_start 只是拉起授权对话框。用户可能拒绝，
+    // 也可能一直不点。这时若直接返回 Ok，界面会显示
+    // 「正在发送系统声音」而实际一个字节都没采——用户只会觉得坏了。
+    //
+    // 判据用采集状态而不是样本计数：设备上没声音在播时，
+    // 采集是正常运行的但样本峰值恒为 0，拿样本数判断会误报超时。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
+    let mut ready = false;
+    while std::time::Instant::now() < deadline {
+        if stop.load(Ordering::Relaxed) {
+            crate::system_audio_bridge::stop();
+            return Err(anyhow::anyhow!("已取消"));
+        }
+        if crate::system_audio_bridge::is_capturing() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    if !ready {
+        crate::system_audio_bridge::stop();
+        return Err(anyhow::anyhow!("系统声音采集未启动：需要在弹出的对话框中允许录制"));
+    }
+
+    log::info!("系统声音采集已就绪，开始传输");
     Ok(CaptureSession::new(source.clone(), stop, stats, Box::new(())))
 }
