@@ -6,10 +6,9 @@
 #![forbid(unsafe_code)]
 
 pub mod capture;
-pub mod capture_android;
-pub mod capture_ios;
 pub mod capture_linux;
 pub mod capture_macos;
+pub mod capture_mobile;
 pub mod capture_windows;
 pub mod engine;
 pub mod platform;

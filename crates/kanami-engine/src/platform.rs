@@ -38,11 +38,11 @@ pub fn capture_backend() -> Box<dyn CaptureBackend> {
     }
     #[cfg(target_os = "android")]
     {
-        Box::new(crate::capture_android::AndroidCaptureBackend::new())
+        Box::new(crate::capture_mobile::MobileCaptureBackend::new("Android"))
     }
     #[cfg(target_os = "ios")]
     {
-        Box::new(crate::capture_ios::IosCaptureBackend::new())
+        Box::new(crate::capture_mobile::MobileCaptureBackend::new("iOS"))
     }
     #[cfg(not(any(
         target_os = "macos",
