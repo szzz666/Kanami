@@ -27,6 +27,27 @@ pub const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2);
 /// 多久没听到某设备的广播就认为它下线了。
 pub const STALE_AFTER: Duration = Duration::from_secs(8);
 
+/// 绑定一个允许同机多进程共享的 UDP 端口。
+///
+/// 只开 SO_REUSEADDR 不够：BSD/macOS 上它不让两个 socket 绑同一 UDP 端口，
+/// 必须再加 SO_REUSEPORT。Linux 上两者语义不同，但一起开是安全的。
+///
+/// 为什么必须共享：广播是「一人发、所有人收」的语义，
+/// 端口被第一个实例独占的话，同一台机器上的第二个实例（诊断探针、
+/// 模拟器转发、开发时开两个窗口）就绑不上，于是「互相发现」永远失败。
+fn bind_shared_port(port: u16) -> std::io::Result<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    sock.set_reuse_address(true)?;
+    #[cfg(not(windows))]
+    sock.set_reuse_port(true)?;
+    let addr: SocketAddr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    sock.bind(&addr.into())?;
+    sock.set_nonblocking(true)?;
+    Ok(sock.into())
+}
+
 /// 一台被发现的对端设备。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDevice {
@@ -177,10 +198,16 @@ impl Broadcaster {
         self_id: String,
         port: u16,
     ) -> std::io::Result<Option<Self>> {
-        let socket = match UdpSocket::bind(("0.0.0.0", port)) {
+        // 用 socket2 建 socket 并开 SO_REUSEADDR / SO_REUSEPORT。
+        //
+        // 直接 UdpSocket::bind 会独占端口：同一台机器上开第二个实例
+        // （桌面端 + 诊断探针，或桌面端 + 模拟器转发）就绑不上，
+        // 于是「两个实例互相发现」永远失败。广播是「一人发、所有人收」
+        // 的语义，端口本来就该允许多个进程共享。
+        let socket = match bind_shared_port(port) {
             Ok(s) => s,
             Err(e) => {
-                log::warn!("发现端口 {DISCOVERY_PORT} 绑定失败：{e}，广播发现不可用");
+                log::warn!("发现端口 {port} 绑定失败：{e}，广播发现不可用");
                 return Ok(None);
             }
         };
@@ -189,14 +216,38 @@ impl Broadcaster {
         Ok(Some(Self { socket, table, self_id }))
     }
 
+    /// 便于日志的一句话描述。
+    pub fn local_addr_label(&self) -> String {
+        match self.socket.local_addr() {
+            Ok(a) => format!("绑定 {a}"),
+            Err(e) => format!("地址未知（{e}）"),
+        }
+    }
+
     /// 发出一次广播通告，并顺带收一轮别人的通告。
     pub fn tick(&self, me: &PeerDevice) {
-        // 发给所有网段的广播地址 + 本地回环（同机多实例时能互相看到）
         let payload = encode_announce(me);
-        let targets = [
+
+        // 有限广播 + 各网卡的子网定向广播 + 本地回环。
+        //
+        // 只发 255.255.255.255 是不够的：Android 与不少 WiFi 驱动/AP
+        // 会过滤有限广播，但放行子网定向广播（如 192.168.3.255）。
+        // 实测手机上「能发现电脑、电脑发现不了手机」这类单向问题，
+        // 一半是组播锁没拿（见 MainActivity），另一半就是这里只发了有限广播。
+        let mut targets = vec![
             SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT)),
             SocketAddr::from((Ipv4Addr::LOCALHOST, DISCOVERY_PORT)),
         ];
+        for ip in crate::audio_socket::local_ipv4_addrs() {
+            // 按 /24 推子网广播。家用与办公网基本都是 /24，
+            // 猜错也只是多一个无效目标，不会造成误投递。
+            let o = ip.octets();
+            let bcast = Ipv4Addr::new(o[0], o[1], o[2], 255);
+            let addr = SocketAddr::from((bcast, DISCOVERY_PORT));
+            if !targets.contains(&addr) {
+                targets.push(addr);
+            }
+        }
         for target in targets {
             let _ = self.socket.send_to(&payload, target);
         }

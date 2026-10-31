@@ -82,7 +82,23 @@ impl AppState {
         let self_id = device_identity();
         let self_name = hostname();
 
-        let broadcaster = Broadcaster::start(Arc::clone(&peers), self_id.clone()).ok().flatten();
+        // 广播器失败不能静默吞掉：这是「局域网自动发现」的唯一出口，
+        // 它挂了的表现是「设备列表永远空着」，而其它一切（手动 IP、
+        // 信令、音频）都正常——最难查的那类故障。
+        let broadcaster = match Broadcaster::start(Arc::clone(&peers), self_id.clone()) {
+            Ok(Some(b)) => {
+                log::info!("发现广播已启动（{}）", b.local_addr_label());
+                Some(b)
+            }
+            Ok(None) => {
+                log::warn!("发现端口被占用，自动发现不可用；仍可用手动 IP 连接");
+                None
+            }
+            Err(e) => {
+                log::error!("发现广播启动失败：{e}；自动发现不可用");
+                None
+            }
+        };
 
         // 音源端信令监听：绑定 0 端口让系统分配。
         //
