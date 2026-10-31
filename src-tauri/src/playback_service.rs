@@ -31,7 +31,16 @@ fn with_env<F: FnOnce(&mut jni::JNIEnv) -> jni::errors::Result<()>>(f: F) {
     };
 
     if let Err(e) = f(&mut env) {
+        // 把 Java 侧的异常堆栈打出来。
+        //
+        // jni 的 Display 只给一句 "Java exception was thrown"，看不出原因。
+        // 实际排查时这一句毫无用处——可能是缺权限、可能是服务类型不对、
+        // 也可能是方法签名写错。有堆栈才能定位。
         log::warn!("调用前台服务失败：{e}");
+        if let Err(je) = env.exception_describe() {
+            log::warn!("打印 Java 异常栈失败：{je}");
+        }
+        let _ = env.exception_clear();
     }
 }
 

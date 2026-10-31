@@ -226,7 +226,11 @@ impl AppState {
         }
 
         // 推状态给前端
-        let _ = app.emit("kanami://status", self.status_snapshot());
+        // 状态推送失败要能看见：前端完全依赖这个事件更新界面，
+        // 它静默失败的表现是「后端一切正常，界面数字永远不动」。
+        if let Err(e) = app.emit("kanami://status", self.status_snapshot()) {
+            log::warn!("状态推送失败：{e}");
+        }
         Ok(())
     }
 
@@ -292,6 +296,19 @@ impl AppState {
                 })
             })
             .collect();
+
+        // 每 50 次 tick 打一次状态摘要。
+        // 排查「后端连上了但界面没反应」这类问题时，
+        // 需要能确认快照里到底有没有音源，而不是靠猜。
+        let tick = self.tick_count.load(Ordering::Relaxed);
+        if tick % 50 == 0 {
+            log::info!(
+                "状态快照：音源 {} 路，接收={}，包数={:?}",
+                sources.len(),
+                engine_status.receiving,
+                sources.iter().map(|s| s["packets"].clone()).collect::<Vec<_>>()
+            );
+        }
 
         serde_json::json!({
             "sending": engine_status.sending,

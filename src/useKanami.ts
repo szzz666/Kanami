@@ -122,7 +122,23 @@ export function useKanami() {
     let unlisten: (() => void) | undefined;
     onStatus((s) => {
       if (!mounted.current) return;
-      setState((prev) => ({ ...prev, status: s, mode: s.mode }));
+      // 与上一份状态合并，而不是整体替换。
+      //
+      // 实测在 Android 上，事件 payload 偶尔会缺字段（只到了部分键），
+      // 整体替换会让 sources 变 undefined，界面直接崩成 0/8 并且
+      // 再也不恢复——因为后续每个事件都只带部分字段。
+      // 合并能保证任何一种 payload 都不会把已有数据打回空白。
+      setState((prev) => {
+        const next: typeof prev.status = { ...EMPTY_STATUS, ...prev.status, ...s };
+        // 数组字段单独兜底：undefined 或非数组都退回上一份
+        if (!Array.isArray(next.sources)) {
+          next.sources = prev.status.sources;
+        }
+        if (typeof next.source_count !== "number") {
+          next.source_count = next.sources.length;
+        }
+        return { ...prev, status: next, mode: next.mode || prev.mode };
+      });
     })
       .then((fn) => {
         unlisten = fn;

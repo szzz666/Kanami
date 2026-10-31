@@ -330,9 +330,14 @@ pub fn connect_to_peer(state: State<'_, AppState>, device_id: String) -> Result<
         accept.mode,
     );
     if !state.engine.add_source(source) {
+        log::error!("加入混音台失败（可能已达 {MAX_SOURCES} 路）");
         return Err("加入混音台失败".into());
     }
     state.connections.lock().insert(device_id.clone(), audio_addr);
+    log::info!(
+        "混音台现在有 {} 路音源（stream_id={stream_id}）",
+        state.engine.incoming.lock().len()
+    );
 
     // 接收线程：按 stream_id 精确投递到对应那一路，
     // 不能写 first_mut()——那样所有音源的数据会挤进同一路。
