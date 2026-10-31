@@ -187,3 +187,49 @@ mod multistream_tests {
         assert!(mixer.source(2).is_none());
     }
 }
+
+#[cfg(test)]
+mod control_state_tests {
+    use crate::mixer::{Mixer, MAX_SOURCES};
+
+    /// 混音台的每路控制状态必须能被读回。
+    ///
+    /// 这条测试锁住一个真实缺陷：status 只回传包数/延迟，
+    /// 不回传 gain/muted/solo，于是前端只能写死——
+    /// 桌面端的「独奏」按钮永远传 true，点了就取消不掉。
+    #[test]
+    fn 控制状态可读回() {
+        let mut mixer = Mixer::new();
+        mixer.add_source(1, MAX_SOURCES);
+
+        mixer.source_mut(1).unwrap().gain = 0.5;
+        mixer.source_mut(1).unwrap().muted = true;
+        mixer.source_mut(1).unwrap().solo = true;
+
+        let s = mixer.source(1).expect("应当能读到这一路");
+        assert_eq!(s.gain, 0.5);
+        assert!(s.muted);
+        assert!(s.solo);
+    }
+
+    /// 独奏必须能取消。
+    ///
+    /// 前端按 `!s.solo` 传参，前提是状态真的能翻回去。
+    #[test]
+    fn 独奏可以取消() {
+        let mut mixer = Mixer::new();
+        mixer.add_source(1, MAX_SOURCES);
+        mixer.source_mut(1).unwrap().solo = true;
+        assert!(mixer.any_solo());
+
+        mixer.source_mut(1).unwrap().solo = false;
+        assert!(!mixer.any_solo(), "取消独奏后不应再有独奏路");
+    }
+
+    /// 不存在的 stream_id 读回来是 None，不能 panic。
+    #[test]
+    fn 未知音源读回为_none() {
+        let mixer = Mixer::new();
+        assert!(mixer.source(99).is_none());
+    }
+}

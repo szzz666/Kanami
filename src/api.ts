@@ -66,6 +66,12 @@ export interface IncomingSourceDto {
   /** 时钟是否已同步。未同步时 latency_ms 不可信。 */
   synced: boolean;
   active: boolean;
+  /** 这一路的音量倍数（1.0 = 原始音量）。 */
+  gain: number;
+  /** 是否静音。 */
+  muted: boolean;
+  /** 是否独奏。独奏时其它路会闭嘴。 */
+  solo: boolean;
 }
 
 export interface StatusSnapshot {

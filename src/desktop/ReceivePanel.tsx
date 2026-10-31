@@ -97,22 +97,28 @@ export default function ReceivePanel({ k }: { k: KanamiApi }) {
                   style={{ width: 120 }}
                   min={0}
                   max={200}
-                  defaultValue={100}
+                  value={Math.round(s.gain * 100)}
                   tooltip={{ formatter: (v) => `${v}%` }}
                   onChange={(v) => k.setSourceVolume(s.stream_id, v / 100)}
                 />
                 <Switch
                   size="small"
+                  checked={s.muted}
                   checkedChildren="静音"
                   unCheckedChildren="发声"
                   onChange={(muted) => k.setSourceMuted(s.stream_id, muted)}
                 />
+                {/* 独奏必须能取消。
+                    原来写死 setSourceSolo(id, true)，点了就永远开——
+                    因为后端状态里没有 solo 字段，界面无从判断当前值。
+                    现在 status 回传了 solo，按钮按真实状态切换。 */}
                 <Button
                   size="small"
-                  onClick={() => k.setSourceSolo(s.stream_id, true)}
-                  title="独奏"
+                  type={s.solo ? "primary" : "default"}
+                  onClick={() => k.setSourceSolo(s.stream_id, !s.solo)}
+                  title={s.solo ? "取消独奏" : "独奏"}
                 >
-                  独奏
+                  {s.solo ? "独奏中" : "独奏"}
                 </Button>
               </div>
             )}

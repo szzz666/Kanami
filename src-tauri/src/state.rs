@@ -273,6 +273,12 @@ impl AppState {
         let engine_status = self.engine.status();
         let now_local = self.started_at.elapsed().as_millis() as i64;
 
+        // 混音台的每路控制状态（音量/静音/独奏）也要回传。
+        //
+        // 不回传的话前端只能写死：之前桌面端的「独奏」按钮永远传 true，
+        // 点了就取消不掉，因为界面根本不知道自己当前是什么状态。
+        // 移动端更是干脆没做独奏——没有可读状态，做出来也没法正确显示。
+        let mixer = self.engine.mixer.lock();
         let sources: Vec<serde_json::Value> = self
             .engine
             .incoming
@@ -282,6 +288,7 @@ impl AppState {
                 // 端到端延迟需要时钟同步才有意义。未同步时给 -1，
                 // 前端据此显示「同步中」而不是一个假的数字。
                 let latency = s.latency_ms(now_local).unwrap_or(-1);
+                let ctl = mixer.source(s.stream_id);
                 serde_json::json!({
                     "stream_id": s.stream_id,
                     "device_id": s.device_id,
@@ -293,9 +300,13 @@ impl AppState {
                     "latency_ms": latency,
                     "synced": latency >= 0,
                     "active": s.active.load(Ordering::Relaxed),
+                    "gain": ctl.map(|c| c.gain).unwrap_or(1.0),
+                    "muted": ctl.map(|c| c.muted).unwrap_or(false),
+                    "solo": ctl.map(|c| c.solo).unwrap_or(false),
                 })
             })
             .collect();
+        drop(mixer);
 
         // 每 50 次 tick 打一次状态摘要。
         // 排查「后端连上了但界面没反应」这类问题时，

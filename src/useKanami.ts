@@ -353,37 +353,45 @@ export function useKanami() {
     [patch, setError, state.pending],
   );
 
+  // 混音台三个控制之后都要重新拉状态。
+  //
+  // 不拉的话界面完全不变：独奏按钮点了还是显示「独奏」，
+  // 滑块松手弹回原位，开关点了没反应——用户会以为功能是坏的，
+  // 其实后端已经改好了。状态是后端算的，界面必须同步回来。
   const setSourceVolume = useCallback(
     async (streamId: number, gain: number) => {
       try {
         await api.setSourceVolume(streamId, gain);
+        await pullStatus();
       } catch (e) {
         setError(e);
       }
     },
-    [setError],
+    [setError, pullStatus],
   );
 
   const setSourceMuted = useCallback(
     async (streamId: number, muted: boolean) => {
       try {
         await api.setSourceMuted(streamId, muted);
+        await pullStatus();
       } catch (e) {
         setError(e);
       }
     },
-    [setError],
+    [setError, pullStatus],
   );
 
   const setSourceSolo = useCallback(
     async (streamId: number, solo: boolean) => {
       try {
         await api.setSourceSolo(streamId, solo);
+        await pullStatus();
       } catch (e) {
         setError(e);
       }
     },
-    [setError],
+    [setError, pullStatus],
   );
 
   const setSelectedSource = useCallback(

@@ -159,13 +159,26 @@ export default function MobileReceive({ k }: { k: KanamiApi }) {
                       style={{ flex: 1 }}
                       min={0}
                       max={200}
-                      defaultValue={100}
+                      value={Math.round(s.gain * 100)}
                       onChange={(v) => k.setSourceVolume(s.stream_id, (v as number) / 100)}
                     />
                     <Switch
+                      checked={s.muted}
                       onChange={(muted) => k.setSourceMuted(s.stream_id, muted)}
                       style={{ "--height": "20px", "--width": "36px" } as never}
                     />
+                    {/* 独奏按钮。
+                        移动端原来没有这个功能——不是不想做，而是后端
+                        status 不回传 solo，做出来也没法显示当前状态。
+                        现在补上，按下变蓝表示独奏中。 */}
+                    <Button
+                      size="mini"
+                      color={s.solo ? "primary" : "default"}
+                      onClick={() => k.setSourceSolo(s.stream_id, !s.solo)}
+                      style={{ minWidth: 44 }}
+                    >
+                      {s.solo ? "独奏中" : "独奏"}
+                    </Button>
                   </div>
                 </div>
               </List.Item>
