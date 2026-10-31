@@ -196,25 +196,42 @@ export function useKanami() {
     }
   }, [patch, setError]);
 
+  const pullStatus = useCallback(async () => {
+    try {
+      const status = await api.status();
+      if (!mounted.current) return;
+      setState((prev) => ({ ...prev, status, mode: status.mode || prev.mode }));
+    } catch {
+      /* 后端还没起来时忽略 */
+    }
+  }, []);
+
   const startSending = useCallback(async () => {
     patch({ busy: true, error: null });
     try {
       await api.startSending(state.selectedSource);
       patch({ busy: false });
+      // 主动拉一次状态。
+      //
+      // 系统声音要等用户在 MediaProjection 对话框里点允许才真正开始，
+      // 这段时间可能十几秒。光靠事件推送，界面会一直显示「未在发送」，
+      // 用户以为没生效就会重复点。
+      await pullStatus();
     } catch (e) {
       setError(e);
     }
-  }, [patch, setError, state.selectedSource]);
+  }, [patch, setError, state.selectedSource, pullStatus]);
 
   const stopSending = useCallback(async () => {
     patch({ busy: true, error: null });
     try {
       await api.stopSending();
       patch({ busy: false });
+      await pullStatus();
     } catch (e) {
       setError(e);
     }
-  }, [patch, setError]);
+  }, [patch, setError, pullStatus]);
 
   // 托盘菜单切换发送
   useEffect(() => {
@@ -237,15 +254,7 @@ export function useKanami() {
     return () => unlisten?.();
   }, [setError]);
 
-  const pullStatus = useCallback(async () => {
-    try {
-      const status = await api.status();
-      if (!mounted.current) return;
-      setState((prev) => ({ ...prev, status, mode: status.mode || prev.mode }));
-    } catch {
-      /* 后端还没起来时忽略 */
-    }
-  }, []);
+
 
   const setMode = useCallback(
     async (mode: string) => {
