@@ -17,3 +17,11 @@ log.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true
+
+
+# JNI 桥：系统声音采集（AudioPlaybackCapture）需要从 Kotlin 侧收样本。
+# 只在 Android 目标下编译，桌面与 iOS 构建完全不受影响。
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+parking_lot.workspace = true

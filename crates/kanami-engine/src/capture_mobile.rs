@@ -49,17 +49,36 @@ impl CaptureBackend for MobileCaptureBackend {
     }
 
     fn list_sources(&self) -> Vec<CaptureSource> {
-        // 系统声音在移动端要么不可用（iOS），要么需要每次投屏授权
-        // 且依赖设备厂商实现了 REMOTE_SUBMIX（Android，实测多数定制 ROM 没有）。
-        // 不列出来，免得用户选了之后莫名其妙没有声音。
-        vec![CaptureSource {
+        let mut out = vec![CaptureSource {
             id: "mic".into(),
             name: "麦克风".into(),
             kind: CaptureKind::Microphone,
             sample_rate: SAMPLE_RATE,
             channels: CHANNELS as u16,
             is_default: true,
-        }]
+        }];
+
+        // 系统声音只有 Android 能给。
+        //
+        // 之前这里写死「多数定制 ROM 没有 REMOTE_SUBMIX，不列出来」——
+        // 那个结论来自模拟器实测，在真机上不成立：
+        // 零售机的 remote_submix 混音路径基本都在，AudioPlaybackCapture
+        // 走的就是它。所以按平台能力判断，而不是按机型猜。
+        #[cfg(target_os = "android")]
+        {
+            if system_audio_supported() {
+                out.push(CaptureSource {
+                    id: "system".into(),
+                    name: "系统声音".into(),
+                    kind: CaptureKind::SystemOutput,
+                    sample_rate: SAMPLE_RATE,
+                    channels: CHANNELS as u16,
+                    is_default: false,
+                });
+            }
+        }
+
+        out
     }
 
     fn start(
@@ -69,6 +88,13 @@ impl CaptureBackend for MobileCaptureBackend {
         stats: Arc<CaptureStats>,
     ) -> anyhow::Result<CaptureSession> {
         let stop = Arc::new(AtomicBool::new(false));
+
+        // 系统声音走另一条路径：AudioPlaybackCapture 由 Kotlin 侧驱动，
+        // 样本通过 JNI 送回来，不需要 cpal。
+        #[cfg(target_os = "android")]
+        if source.kind == CaptureKind::SystemOutput {
+            return start_system_audio(source, on_samples, stats, stop);
+        }
 
         // cpal 的 Stream 是 !Send，必须活在创建它的线程里。
         // 这里开一个专用线程持有它，stop 置位时线程退出、Stream 随之 drop。
@@ -323,4 +349,48 @@ mod tests {
         let mut r = LinearResampler::new(44100, 48000);
         assert!(r.process(&[]).is_empty());
     }
+}
+
+/// 这台设备是否支持采集系统声音。
+///
+/// 桌面端返回 false：系统声音在 PC 上走的是另一套（WASAPI loopback /
+/// PulseAudio monitor），由各自的 capture 后端实现，不经过这里。
+pub fn system_audio_supported() -> bool {
+    #[cfg(target_os = "android")]
+    {
+        crate::system_audio_bridge::is_supported()
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        false
+    }
+}
+
+/// 启动系统声音采集（仅 Android）。
+///
+/// Kotlin 侧会弹出 MediaProjection 授权框。用户点允许后
+/// 采集才开始，样本通过 JNI 回调送进来。
+#[cfg(target_os = "android")]
+fn start_system_audio(
+    source: &CaptureSource,
+    mut on_samples: CaptureCallback,
+    stats: Arc<CaptureStats>,
+    stop: Arc<AtomicBool>,
+) -> anyhow::Result<CaptureSession> {
+    if !crate::system_audio_bridge::is_supported() {
+        return Err(anyhow::anyhow!("这台设备不支持系统声音采集"));
+    }
+
+    let stats_cb = Arc::clone(&stats);
+    let requested = crate::system_audio_bridge::request_start(move |samples: Vec<f32>| {
+        stats_cb.frames.fetch_add(1, Ordering::Relaxed);
+        on_samples(&samples);
+    });
+
+    if !requested {
+        return Err(anyhow::anyhow!("无法请求系统声音采集授权"));
+    }
+
+    log::info!("系统声音采集已请求，等待用户授权");
+    Ok(CaptureSession::new(source.clone(), stop, stats, Box::new(())))
 }
