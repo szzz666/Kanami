@@ -49,6 +49,8 @@ impl CaptureBackend for MobileCaptureBackend {
     }
 
     fn list_sources(&self) -> Vec<CaptureSource> {
+        // 只有 Android 分支会往里 push 系统声音，其它平台 mut 用不上
+        #[allow(unused_mut)]
         let mut out = vec![CaptureSource {
             id: "mic".into(),
             name: "麦克风".into(),
@@ -305,52 +307,6 @@ fn duplicate_to_stereo(mono: &[f32]) -> Vec<f32> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn 降混把立体声取平均() {
-        let data = [1.0f32, 0.0, 0.5, 0.5];
-        let mono = to_mono(&data, 2);
-        assert_eq!(mono, vec![0.5, 0.5]);
-    }
-
-    #[test]
-    fn 同采样率时只做声道复制() {
-        let mut r = LinearResampler::new(48000, 48000);
-        let out = r.process(&[0.1, 0.2]);
-        assert_eq!(out.len(), 4, "两帧单声道 → 两帧双声道");
-        assert!((out[0] - 0.1).abs() < 1e-6);
-        assert!((out[3] - 0.2).abs() < 1e-6);
-    }
-
-    #[test]
-    fn 重采样保持时长大致不变() {
-        let mut r = LinearResampler::new(44100, 48000);
-        let input = vec![0.5f32; 4410];
-        let out = r.process(&input);
-        let frames = out.len() / CHANNELS;
-        // 4410 个 44.1k 样本 ≈ 4800 个 48k 样本
-        assert!((frames as i64 - 4800).abs() < 100, "实际 {frames} 帧");
-    }
-
-    #[test]
-    fn 重采样保持幅度() {
-        let mut r = LinearResampler::new(44100, 48000);
-        let out = r.process(&vec![0.5f32; 4410]);
-        for &s in &out {
-            assert!((s - 0.5).abs() < 1e-5, "直流信号重采样后仍应是 0.5，实际 {s}");
-        }
-    }
-
-    #[test]
-    fn 空输入不会崩() {
-        let mut r = LinearResampler::new(44100, 48000);
-        assert!(r.process(&[]).is_empty());
-    }
-}
-
 /// 这台设备是否支持采集系统声音。
 ///
 /// 桌面端返回 false：系统声音在 PC 上走的是另一套（WASAPI loopback /
@@ -420,4 +376,50 @@ fn start_system_audio(
 
     log::info!("系统声音采集已就绪，开始传输");
     Ok(CaptureSession::new(source.clone(), stop, stats, Box::new(())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 降混把立体声取平均() {
+        let data = [1.0f32, 0.0, 0.5, 0.5];
+        let mono = to_mono(&data, 2);
+        assert_eq!(mono, vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn 同采样率时只做声道复制() {
+        let mut r = LinearResampler::new(48000, 48000);
+        let out = r.process(&[0.1, 0.2]);
+        assert_eq!(out.len(), 4, "两帧单声道 → 两帧双声道");
+        assert!((out[0] - 0.1).abs() < 1e-6);
+        assert!((out[3] - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn 重采样保持时长大致不变() {
+        let mut r = LinearResampler::new(44100, 48000);
+        let input = vec![0.5f32; 4410];
+        let out = r.process(&input);
+        let frames = out.len() / CHANNELS;
+        // 4410 个 44.1k 样本 ≈ 4800 个 48k 样本
+        assert!((frames as i64 - 4800).abs() < 100, "实际 {frames} 帧");
+    }
+
+    #[test]
+    fn 重采样保持幅度() {
+        let mut r = LinearResampler::new(44100, 48000);
+        let out = r.process(&vec![0.5f32; 4410]);
+        for &s in &out {
+            assert!((s - 0.5).abs() < 1e-5, "直流信号重采样后仍应是 0.5，实际 {s}");
+        }
+    }
+
+    #[test]
+    fn 空输入不会崩() {
+        let mut r = LinearResampler::new(44100, 48000);
+        assert!(r.process(&[]).is_empty());
+    }
 }
