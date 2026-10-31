@@ -273,23 +273,42 @@ export function useKanami() {
     [refreshPeers, setError],
   );
 
+  /// 主动拉一次状态。
+  ///
+  /// 不依赖 kanami://status 事件：实测在 Android WebView 里，
+  /// 事件偶尔会丢失或只带部分字段，界面就会一直停在
+  /// 「未在接收 / 0/8」，而后端其实已经有音源在跑。
+  /// 每个会改变状态的操作之后都主动拉一次，事件只当锦上添花。
+  const pullStatus = useCallback(async () => {
+    try {
+      const status = await api.status();
+      if (!mounted.current) return;
+      setState((prev) => ({ ...prev, status, mode: status.mode || prev.mode }));
+    } catch {
+      /* 后端还没起来时忽略 */
+    }
+  }, []);
+
   const connectToPeer = useCallback(
     async (deviceId: string) => {
       patch({ busy: true, error: null });
       try {
         await api.connectToPeer(deviceId);
         patch({ busy: false });
+        // 连上之后立刻拉状态：混音台要马上显示出这一路
+        await pullStatus();
       } catch (e) {
         setError(e);
       }
     },
-    [patch, setError],
+    [patch, setError, pullStatus],
   );
 
   const disconnectPeer = useCallback(
     async (deviceId: string) => {
       try {
         await api.disconnectPeer(deviceId);
+        await pullStatus();
       } catch (e) {
         setError(e);
       }
@@ -379,6 +398,7 @@ export function useKanami() {
     setSelectedSource,
     clearError,
     refreshPeers,
+    pullStatus,
   };
 }
 
