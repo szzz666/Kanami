@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use tauri::Manager;
 
+mod addr;
 mod commands;
 #[cfg(target_os = "android")]
 mod playback_service;

@@ -231,8 +231,8 @@ pub fn scan_peers(state: State<'_, AppState>) -> Vec<PeerDto> {
 /// 手动添加设备。广播被拦截时这是唯一能用的方式。
 #[tauri::command]
 pub fn add_peer_manual(state: State<'_, AppState>, addr: String) -> Result<PeerDto, String> {
-    let parsed: SocketAddr =
-        addr.parse().map_err(|_| "地址格式不对，应当形如 192.168.1.10:47822".to_string())?;
+    let parsed =
+        crate::addr::parse_manual_addr(&addr).map_err(|e| format!("{e}（收到的是「{addr}」）"))?;
 
     let device = PeerDevice {
         device_id: format!("manual:{}", parsed),
