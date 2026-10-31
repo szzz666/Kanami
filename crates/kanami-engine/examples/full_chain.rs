@@ -192,7 +192,7 @@ fn run_once(mode: QualityMode) -> Result<Report, Box<dyn std::error::Error>> {
                     pcm[i * 2] = v;
                     pcm[i * 2 + 1] = v;
                 }
-                outgoing.feed(&pcm, seq * u32::from(params.frame_ms));
+                outgoing.feed(&pcm, seq * params.frame_ms);
                 seq += 1;
 
                 // 播放端收
