@@ -89,7 +89,15 @@ pub fn caps() -> PlatformCaps {
 
     #[cfg(target_os = "android")]
     {
-        notes.push("本机只能采集麦克风（系统声音采集需要 REMOTE_SUBMIX，多数设备不具备）".into());
+        // 之前这里写「只能采集麦克风，多数设备不具备 REMOTE_SUBMIX」——
+        // 那个结论来自模拟器，在真机上不成立。零售机的 remote_submix
+        // 混音路径基本都在，AudioPlaybackCapture 走的就是它。
+        // 过时文案会误导用户，让他们以为选了系统声音也不会工作。
+        if system_audio {
+            notes.push("系统声音每次开始发送都要在系统弹窗里授权；共享范围请选「整个屏幕」".into());
+        } else {
+            notes.push("这台设备不支持采集系统声音，只能采集麦克风".into());
+        }
         notes.push("锁屏后继续播放依赖前台服务与通知权限".into());
     }
 

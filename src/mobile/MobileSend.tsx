@@ -22,6 +22,23 @@ export default function MobileSend({ k }: { k: KanamiApi }) {
         />
       )}
 
+      {/* 平台限制说明。后端早就生成了这些文案
+          （macOS 的屏幕录制授权、Android 的采集限制等），
+          但一直没渲染——用户遇到权限问题只能看着「正在发送」却没声音发呆。 */}
+      {k.platform && k.platform.notes.length > 0 && (
+        <NoticeBar
+          content={
+            <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+              {k.platform.notes.map((n, i) => (
+                <div key={i}>· {n}</div>
+              ))}
+            </div>
+          }
+          color="info"
+          wrap
+        />
+      )}
+
       <Card title={S.modeLabel}>
         <Selector
           options={[

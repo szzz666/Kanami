@@ -159,7 +159,7 @@ impl CaptureBackend for MacCaptureBackend {
                 std::thread::sleep(std::time::Duration::from_secs(6));
                 if watchdog_stats.frames.load(Ordering::Relaxed) == 0 {
                     log::warn!(
-                        "macOS 采集 6 秒无数据：通常是缺少「音频录制」权限。                         请到 系统设置 → 隐私与安全性 → 麦克风 中允许 Kanami，再重开应用。"
+                        "macOS 采集 6 秒无数据：通常是缺少「音频录制」权限。请到 系统设置 → 隐私与安全性 → 麦克风 中允许 Kanami，再重开应用。"
                     );
                 }
             });

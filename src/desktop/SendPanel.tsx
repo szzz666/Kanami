@@ -60,6 +60,25 @@ export default function SendPanel({ k }: { k: KanamiApi }) {
         ]}
       >
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          {/* 平台限制说明。
+              这些文案后端早就生成了（macOS 的屏幕录制授权、Windows 的
+              回授提示、Linux 的 PulseAudio 检查、Android 的采集限制），
+              但一直没人渲染——用户遇到权限问题时界面上毫无提示，
+              只能看着「正在发送」却没声音发呆。 */}
+          {k.platform && k.platform.notes.length > 0 && (
+            <Alert
+              type="info"
+              showIcon
+              message={
+                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>
+                  {k.platform.notes.map((n, i) => (
+                    <li key={i}>{n}</li>
+                  ))}
+                </ul>
+              }
+            />
+          )}
+
           <div>
             <Typography.Text type="secondary">{S.sendSourceHint}</Typography.Text>
           </div>
