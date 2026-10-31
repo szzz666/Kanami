@@ -16,6 +16,7 @@ use tauri::Manager;
 
 mod addr;
 mod commands;
+mod persist;
 #[cfg(target_os = "android")]
 mod playback_service;
 mod state;

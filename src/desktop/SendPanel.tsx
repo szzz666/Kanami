@@ -76,6 +76,24 @@ export default function SendPanel({ k }: { k: KanamiApi }) {
             notFoundContent={<Empty description="没有可用音源" />}
           />
 
+          {/* 选了「系统声音」时给出操作步骤。
+              系统授权对话框默认「共享一个应用」，选错的表现是
+              「显示正在发送但没有声音」，用户无从判断。 */}
+          {k.selectedSource === "system" && (
+            <Alert
+              type="info"
+              showIcon
+              message={S.systemAudioHint}
+              style={{ fontSize: 13 }}
+            />
+          )}
+
+          {k.busy && k.selectedSource === "system" && !running && (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {S.waitingAuth}
+            </Typography.Text>
+          )}
+
           {k.platform && !k.platform.process_exclusion && (
             <Alert
               type="warning"

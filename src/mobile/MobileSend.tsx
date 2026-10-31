@@ -4,8 +4,11 @@ import { S } from "../strings";
 
 /// 移动端发送页。
 ///
-/// 移动端能发的只有麦克风（Android 的系统声音采集需要 REMOTE_SUBMIX，
-/// 实测目标设备不具备；iOS 根本拿不到系统输出）。
+/// 移动端发送页。
+///
+/// 音源列表由后端按平台能力给出：Android 上如果设备支持
+/// AudioPlaybackCapture，会多出一个「系统声音」选项；
+/// iOS 只可能有麦克风（系统不开放输出采集）。
 export default function MobileSend({ k }: { k: KanamiApi }) {
   const running = k.status.sending;
 
@@ -50,6 +53,23 @@ export default function MobileSend({ k }: { k: KanamiApi }) {
                   ))}
                 </Space>
               </Radio.Group>
+
+              {/* 选了「系统声音」时给出明确的操作步骤。
+                  这一条不加，用户几乎必然踩坑：
+                  系统授权对话框默认是「共享一个应用」，
+                  选它只能抓那一个应用的音频，而且采集者自己（本应用）
+                  始终被排除（防回授）。结果是电平恒为 0、
+                  界面显示「正在发送」却没声音——完全看不出哪里错了。
+                  实测时我自己的排查也卡在这里很久。 */}
+              {k.selectedSource === "system" && (
+                <div style={{ marginTop: 10 }}>
+                  <NoticeBar
+                    content={S.systemAudioHint}
+                    color="info"
+                    wrap
+                  />
+                </div>
+              )}
             </div>
           </List.Item>
           {running && (
@@ -66,6 +86,11 @@ export default function MobileSend({ k }: { k: KanamiApi }) {
           >
             {running ? S.sendStop : S.sendStart}
           </Button>
+          {k.busy && k.selectedSource === "system" && !running && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "#86909c", textAlign: "center" }}>
+              {S.waitingAuth}
+            </div>
+          )}
         </div>
       </Card>
 

@@ -66,6 +66,22 @@ impl SharedOutput {
         self.out_channels.store(u32::from(channels), Ordering::Relaxed);
     }
 
+    /// 丢弃缓冲里还没播出去的音频。
+    ///
+    /// 为什么必须有它：断开的音源不该继续出声。
+    ///
+    /// 环形缓冲存了约 2 秒的数据，cpal 按声卡时钟慢慢拉。断开后
+    /// 如果不清，那 2 秒的残留会继续播完——用户点了「断开」，
+    /// 声音却还在响，第一反应就是「这个按钮没用」。
+    pub fn clear(&self) {
+        let mut ring = self.buf.lock();
+        ring.read = 0;
+        ring.len = 0;
+        for s in ring.data.iter_mut() {
+            *s = 0.0;
+        }
+    }
+
     pub fn note_callback(&self, _channels: usize) {
         self.health.callbacks.fetch_add(1, Ordering::Relaxed);
     }

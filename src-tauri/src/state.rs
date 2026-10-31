@@ -77,7 +77,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(_app: &AppHandle) -> anyhow::Result<Self> {
+    pub fn new(app: &AppHandle) -> anyhow::Result<Self> {
         let peers = Arc::new(PeerTable::new());
         let self_id = device_identity();
         let self_name = hostname();
@@ -141,7 +141,7 @@ impl AppState {
             audio_port: AtomicU32::new(0),
             signal_port: AtomicU32::new(u32::from(signal_port)),
             listener: Mutex::new(listener),
-            trusted: Arc::new(Mutex::new(HashSet::new())),
+            trusted: Arc::new(Mutex::new(crate::persist::load_trusted(app))),
             pending: Arc::new(Mutex::new(Vec::new())),
             mode: Mutex::new(QualityMode::Standard),
             connections: Mutex::new(HashMap::new()),

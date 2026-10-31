@@ -98,14 +98,35 @@ pub fn request_start(mut on_samples: impl FnMut(Vec<f32>) + Send + 'static) -> b
         Ok(())
     });
     if ok {
+        // 记一笔「有活跃会话」，开机自启靠它决定要不要恢复。
+        //
+        // 系统声音这条路不走 startPlaybackService（那个是给接收用的），
+        // 所以必须在这里单独标记，否则「发系统声音时重启手机」
+        // 开机后什么都不会恢复。
+        set_active_session(true);
         log::info!("已请求系统声音采集授权");
     }
     ok
 }
 
+/// 记录当前是否有活跃会话（供开机自启判断）。
+pub fn set_active_session(active: bool) {
+    with_env(|env| {
+        let act = activity(env)?;
+        env.call_static_method(
+            "com/szzz666/kanami/MainActivity",
+            "setActiveSession",
+            "(Landroid/content/Context;Z)V",
+            &[(&act).into(), jni::objects::JValue::Bool(u8::from(active))],
+        )?;
+        Ok(())
+    });
+}
+
 /// 停止采集并清掉回调。
 pub fn stop() {
     *SINK.lock() = None;
+    set_active_session(false);
     with_env(|env| {
         env.call_static_method(
             "com/szzz666/kanami/MainActivity",

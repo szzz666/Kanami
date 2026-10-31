@@ -282,9 +282,19 @@ pub fn connect_to_peer(state: State<'_, AppState>, device_id: String) -> Result<
     // 「后端逻辑失败」的分水岭。
     log::info!("收到连接请求：device_id={device_id}");
 
-    // 幂等：已经在收这台设备就不重复连
-    if state.connections.lock().contains_key(&device_id) {
-        return Err("已经连接到这台设备了".into());
+    // 幂等：已经在收这台设备就不重复连。
+    //
+    // 光看 connections 不够——断开时若没清干净（比如接收线程还在、
+    // 或者前端状态没及时刷新导致用户又点了一次「连接」），
+    // 会出现同一台设备占了两个 stream_id 的情况：
+    // 混音台显示 2 路，实际是同一个音源被重复接收。
+    // 所以这里同时看 incoming 里有没有这个 device_id。
+    {
+        let already = state.engine.incoming.lock().iter().any(|s| s.device_id == device_id);
+        if already || state.connections.lock().contains_key(&device_id) {
+            log::info!("{device_id} 已在接收中，忽略重复连接请求");
+            return Err("已经连接到这台设备了".into());
+        }
     }
 
     let peer = match state.peers.get(&device_id) {
@@ -378,7 +388,11 @@ pub fn connect_to_peer(state: State<'_, AppState>, device_id: String) -> Result<
 
 #[tauri::command]
 pub fn disconnect_peer(state: State<'_, AppState>, device_id: String) -> bool {
+    // 入口就打日志：如果连这行都看不到，说明前端根本没调到这里，
+    // 排查方向就完全不同（UI 事件没触发 vs 后端失败）。
+    log::info!("收到断开请求：device_id={device_id}");
     let Some(addr) = state.connections.lock().remove(&device_id) else {
+        log::warn!("断开失败：{device_id} 不在连接表里");
         return false;
     };
     // 按对端地址找到对应那一路并移除，而不是盲目移除第一路
@@ -386,6 +400,11 @@ pub fn disconnect_peer(state: State<'_, AppState>, device_id: String) -> bool {
         state.engine.incoming.lock().iter().find(|s| s.device_id == device_id).map(|s| s.stream_id);
     if let Some(id) = stream_id {
         state.engine.remove_source(id);
+        // 清掉输出缓冲里还没播出去的音频。
+        //
+        // 不清的话，断开后声音还会继续响将近两秒（环形缓冲约 2 秒），
+        // 用户会以为「断开」没生效——实测就是这个现象。
+        state.engine.output.clear();
     } else {
         let _ = addr;
     }
@@ -459,9 +478,15 @@ pub fn set_source_solo(state: State<'_, AppState>, stream_id: u16, solo: bool) -
 
 /// 音源端：批准一个播放端接入。
 #[tauri::command]
-pub fn approve_peer(state: State<'_, AppState>, device_id: String) -> bool {
+pub fn approve_peer(app: tauri::AppHandle, state: State<'_, AppState>, device_id: String) -> bool {
     state.trusted.lock().insert(device_id.clone());
     state.pending.lock().retain(|p| p.device_id != device_id);
+    // 立刻落盘。
+    //
+    // 不保存的话，应用重启后白名单回到空集，同一台播放端又会被拒——
+    // 用户看到的是「以前授权过，怎么又要授权」，很容易以为连接坏了。
+    crate::persist::save_trusted(&app, &state.trusted.lock());
+    log::info!("已授权 {device_id} 并保存");
     true
 }
 
