@@ -8,7 +8,7 @@
 //! 「listen」模式下如果端口被占用（已有 Kanami 在跑），
 //! 会改用临时端口发广播，仍能收到别人的通告。
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use kanami_net::discovery::{PeerTable, DISCOVERY_PORT};
