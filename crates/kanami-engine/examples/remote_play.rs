@@ -29,7 +29,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         role: Role::Player,
         mode: QualityMode::Standard,
         device_name: "Kanami 跨设备测试".into(),
-        device_id: format!("probe-{}", std::process::id()),
+        // 支持固定 device_id（用 KANAMI_PROBE_ID 环境变量），
+        // 便于验证「授权一次后重启仍记得」这条链路。
+        device_id: std::env::var("KANAMI_PROBE_ID")
+            .unwrap_or_else(|_| format!("probe-{}", std::process::id())),
     };
 
     let started = Instant::now();

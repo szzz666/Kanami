@@ -164,7 +164,9 @@ impl RejectReason {
             Self::NotTrusted => "播放端尚未确认接入此音源",
             Self::TooManyPlayers => "音源已达同时推送上限",
             Self::UnsupportedMode => "不支持该模式",
-            Self::ResourceBusy => "音频端口被占用",
+            // 实际最常见的触发点是「音源端还没点开始发送」，
+            // 而不是端口真的被别的进程占了。文案要指向用户能动作的地方。
+            Self::ResourceBusy => "音源端还没开始发送，请先在对方设备上点「开始发送」",
         }
     }
 

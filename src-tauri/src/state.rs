@@ -470,6 +470,22 @@ fn handle_signal(mut stream: std::net::TcpStream, addr: SocketAddr, ctx: &Signal
                 return;
             }
 
+            // 还没开始发送就别答应。
+            //
+            // audio_port 是 start_sending 时绑定出来的，没点「开始发送」
+            // 它就是 0。这时回 Accept 会让播放端拿到「音频端口 0」，
+            // 握手成功却发不出包——对方看到的是「连上了但没声音」，
+            // 完全不知道是音源端根本没在发送。
+            //
+            // 明确回一个 ResourceBusy，让播放端能给出准确提示。
+            if ctx.audio_port == 0 {
+                let reason = RejectReason::ResourceBusy;
+                let _ = Signal::new(SignalKind::Reject, reason.code().as_bytes().to_vec())
+                    .write_to(&mut stream);
+                log::info!("回绝 {addr}：本机还没有开始发送（音频端口未就绪）");
+                return;
+            }
+
             let accept = Accept {
                 mode: ctx.mode,
                 audio_port: ctx.audio_port,

@@ -22,6 +22,40 @@ export default function ReceivePanel({ k }: { k: KanamiApi }) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      {/* 待确认的接入请求。
+          播放端连上来时服务端回 Reject(NotTrusted)，必须本机批准才放行。
+          没有这个入口，用户看到的就是「对方一直连不上」，
+          原因藏在日志里，界面上毫无线索。 */}
+      {k.pending.length > 0 && (
+        <Card title={S.pendingTitle}>
+          <List
+            dataSource={k.pending}
+            renderItem={(p) => (
+              <List.Item
+                actions={[
+                  <Button
+                    key="ok"
+                    type="primary"
+                    size="small"
+                    onClick={() => k.approvePeer(p.device_id)}
+                  >
+                    {S.pendingApprove}
+                  </Button>,
+                  <Button key="no" size="small" onClick={() => k.rejectPeer(p.device_id)}>
+                    {S.pendingReject}
+                  </Button>,
+                ]}
+              >
+                <List.Item.Meta title={p.name} description={p.addr} />
+              </List.Item>
+            )}
+          />
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {S.pendingHint}
+          </Typography.Text>
+        </Card>
+      )}
+
       <Card title={S.devicesTitle} extra={<PeerList.Toolbar k={k} />}>
         <PeerList k={k} />
       </Card>

@@ -23,6 +23,45 @@ export default function MobileReceive({ k }: { k: KanamiApi }) {
 
   return (
     <Space direction="vertical" style={{ width: "100%", "--gap": "12px" } as never}>
+      {/* 待确认的接入请求。
+          这一块必须有：播放端连上来时服务端会回 Reject(NotTrusted)，
+          等本机批准后才放行。没有这个入口，用户看到的就是
+          「对方一直连不上」，而原因藏在日志里，界面上毫无线索。 */}
+      {k.pending.length > 0 && (
+        <Card title={S.pendingTitle}>
+          <List>
+            {k.pending.map((p) => (
+              <List.Item
+                key={p.device_id}
+                description={p.addr}
+                extra={
+                  <Space>
+                    <Button
+                      size="mini"
+                      color="primary"
+                      onClick={() => k.approvePeer(p.device_id)}
+                    >
+                      {S.pendingApprove}
+                    </Button>
+                    <Button
+                      size="mini"
+                      onClick={() => k.rejectPeer(p.device_id)}
+                    >
+                      {S.pendingReject}
+                    </Button>
+                  </Space>
+                }
+              >
+                {p.name}
+              </List.Item>
+            ))}
+          </List>
+          <div style={{ fontSize: 12, color: "#86909c", paddingTop: 8 }}>
+            {S.pendingHint}
+          </div>
+        </Card>
+      )}
+
       <Card
         title={S.devicesTitle}
         extra={
