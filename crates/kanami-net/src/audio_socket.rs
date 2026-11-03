@@ -41,8 +41,13 @@ pub struct AudioSocket {
     /// 绑定的固定端口 socket。回送方向必须始终用它，否则 NAT 会丢弃。
     socket: UdpSocket,
     stats: Arc<LinkStats>,
-    /// 最近一次学到的对端地址。
-    peer: parking_lot::Mutex<Option<SocketAddr>>,
+    /// 学到的所有对端地址。
+    ///
+    /// 为什么是集合而不是单个地址：音源端可能同时被多个播放端接入。
+    /// 原来这里只有一个 Option，learn_peer 直接覆盖——第二个播放端连上来时
+    /// 第一个就再也收不到音频了，而且没有任何报错。
+    /// 发出端自己完全感知不到，接入方看到的是「连上了但没声音」。
+    peers: parking_lot::Mutex<Vec<SocketAddr>>,
     /// 最近一次保活时刻。
     last_keepalive_ms: AtomicU64,
     /// 本次通道的流标识。
@@ -55,7 +60,7 @@ impl std::fmt::Debug for AudioSocket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AudioSocket")
             .field("local_addr", &self.socket.local_addr().ok())
-            .field("peer", &self.peer.lock())
+            .field("peers", &self.peers.lock())
             .finish()
     }
 }
@@ -70,7 +75,7 @@ impl AudioSocket {
         Ok(Self {
             socket,
             stats: Arc::new(LinkStats::default()),
-            peer: parking_lot::Mutex::new(None),
+            peers: parking_lot::Mutex::new(Vec::new()),
             last_keepalive_ms: AtomicU64::new(0),
             stream_id,
             epoch: Instant::now(),
@@ -92,25 +97,47 @@ impl AudioSocket {
     }
 
     /// 当前学到的对端地址。
+    /// 最近学到的对端地址（兼容旧接口；多对端时取第一个）。
     pub fn peer(&self) -> Option<SocketAddr> {
-        *self.peer.lock()
+        self.peers.lock().first().copied()
     }
 
-    /// 显式设置对端（手动 IP 模式用）。
+    /// 当前学到的所有对端。
+    pub fn peers(&self) -> Vec<SocketAddr> {
+        self.peers.lock().clone()
+    }
+
+    /// 显式设置对端（手动 IP 模式用）。会清掉之前学到的地址。
     pub fn set_peer(&self, addr: SocketAddr) {
-        *self.peer.lock() = Some(addr);
+        let mut guard = self.peers.lock();
+        guard.clear();
+        guard.push(addr);
     }
 
     /// 从收到的包中学习对端地址。
     ///
     /// 这是整套 NAT 穿透的关键：对端源端口每次随机，
     /// 只有从实际收到的包里学，回程才打得回去。
+    ///
+    /// **追加而不是覆盖**：音源端可能同时被多个播放端接入。
+    /// 原来的实现是覆盖，第二个播放端连上来时第一个就静默失联了。
     pub fn learn_peer(&self, addr: SocketAddr) {
-        let mut guard = self.peer.lock();
-        if *guard != Some(addr) {
-            log::debug!("学到对端地址 {addr}");
-            *guard = Some(addr);
+        let mut guard = self.peers.lock();
+        if !guard.contains(&addr) {
+            // 上限防止异常情况下无限增长（正常不会超过混音台上限）
+            const MAX_PEERS: usize = 16;
+            if guard.len() >= MAX_PEERS {
+                log::warn!("对端已达上限 {MAX_PEERS}，忽略新地址 {addr}");
+                return;
+            }
+            log::debug!("学到对端地址 {addr}（共 {} 个）", guard.len() + 1);
+            guard.push(addr);
         }
+    }
+
+    /// 移除一个对端（撤销授权时用）。
+    pub fn forget_peer(&self, addr: SocketAddr) {
+        self.peers.lock().retain(|a| *a != addr);
     }
 
     /// 发出一个包。没有对端地址时直接返回，不报错——
@@ -122,24 +149,36 @@ impl AudioSocket {
         timestamp_ms: u32,
         payload: &[u8],
     ) -> io::Result<bool> {
-        let Some(peer) = self.peer() else {
+        let peers = self.peers();
+        if peers.is_empty() {
             return Ok(false);
-        };
+        }
         let mut buf = vec![0u8; HEADER_LEN + payload.len()];
         let header = Header::new(kind, self.stream_id, seq, timestamp_ms, 0);
         let n = header
             .write_packet(payload, &mut buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
 
-        match self.socket.send_to(&buf[..n], peer) {
-            Ok(sent) => {
-                self.stats.packets_sent.fetch_add(1, Ordering::Relaxed);
-                self.stats.bytes_sent.fetch_add(sent as u64, Ordering::Relaxed);
-                Ok(true)
+        // 扇出：每个学到的对端都发一份。
+        //
+        // 只发给单个对端的话，第二个播放端接入时第一个就断流了。
+        let mut any_sent = false;
+        let mut last_err = None;
+        for peer in peers {
+            match self.socket.send_to(&buf[..n], peer) {
+                Ok(sent) => {
+                    self.stats.packets_sent.fetch_add(1, Ordering::Relaxed);
+                    self.stats.bytes_sent.fetch_add(sent as u64, Ordering::Relaxed);
+                    any_sent = true;
+                }
+                // 对端暂时不可达不算致命：NAT 映射可能需要一轮重试才通
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => last_err = Some(e),
             }
-            // 对端暂时不可达不算致命：NAT 映射可能需要一轮重试才通
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(false),
-            Err(e) => Err(e),
+        }
+        match last_err {
+            Some(e) if !any_sent => Err(e),
+            _ => Ok(any_sent),
         }
     }
 
@@ -281,5 +320,95 @@ mod peer_learning_tests {
         // 学到之后，音频才真的发得出去
         let sent = receiver.send(PacketKind::Audio, 0, 0, &[9; 32]).expect("发送失败");
         assert!(sent, "学到对端后音频必须能发出去");
+    }
+}
+
+#[cfg(test)]
+mod fanout_tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// 学习多个对端后，每个都应当收到音频。
+    ///
+    /// 这条锁住一个真实缺陷：peers 原来只有一个 Option，
+    /// learn_peer 直接覆盖。第二个播放端接入时第一个就静默失联——
+    /// 音源端完全感知不到，第一个播放端看到的是「连上了但没声音」。
+    #[test]
+    fn 多个对端都能收到音频() {
+        let source = AudioSocket::bind(0, 1).expect("音源端绑定失败");
+        let p1 = AudioSocket::bind(0, 2).expect("播放端1绑定失败");
+        let p2 = AudioSocket::bind(0, 3).expect("播放端2绑定失败");
+
+        // 两个播放端各自给音源端发一个 Hello，音源端据此学到两个地址
+        p1.set_peer(source.local_addr().unwrap());
+        p2.set_peer(source.local_addr().unwrap());
+        p1.send(PacketKind::Hello, 0, 0, &[]).unwrap();
+        p2.send(PacketKind::Hello, 0, 0, &[]).unwrap();
+
+        // 音源端收包学地址
+        let mut learned = 0;
+        for _ in 0..400 {
+            while let Ok(Some(_)) = source.try_recv() {
+                learned += 1;
+            }
+            if learned >= 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(source.peers().len(), 2, "应当学到两个不同的对端");
+
+        // 发一帧音频，两个播放端都该收到
+        assert!(source.send(PacketKind::Audio, 0, 0, &[1, 2, 3]).unwrap());
+
+        let mut got1 = false;
+        let mut got2 = false;
+        for _ in 0..200 {
+            if p1.try_recv().unwrap().is_some() {
+                got1 = true;
+            }
+            if p2.try_recv().unwrap().is_some() {
+                got2 = true;
+            }
+            if got1 && got2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(got1, "第一个播放端必须收到音频（不能因为第二个接入而断流）");
+        assert!(got2, "第二个播放端必须收到音频");
+    }
+
+    /// 学到的对端去重，同一地址不重复添加。
+    #[test]
+    fn 重复地址不重复添加() {
+        let sock = AudioSocket::bind(0, 1).expect("绑定失败");
+        let addr1: SocketAddr = "127.0.0.1:1111".parse().unwrap();
+        sock.learn_peer(addr1);
+        sock.learn_peer(addr1);
+        assert_eq!(sock.peers().len(), 1);
+    }
+
+    /// forget_peer 能移除指定对端。
+    #[test]
+    fn 可以移除对端() {
+        let sock = AudioSocket::bind(0, 1).expect("绑定失败");
+        let a: SocketAddr = "127.0.0.1:1111".parse().unwrap();
+        let b: SocketAddr = "127.0.0.1:2222".parse().unwrap();
+        sock.learn_peer(a);
+        sock.learn_peer(b);
+        sock.forget_peer(a);
+        assert_eq!(sock.peers(), vec![b]);
+    }
+
+    /// set_peer 会清掉之前学到的地址。
+    #[test]
+    fn 显式设置会清空旧的() {
+        let sock = AudioSocket::bind(0, 1).expect("绑定失败");
+        sock.learn_peer("127.0.0.1:1111".parse().unwrap());
+        sock.learn_peer("127.0.0.1:2222".parse().unwrap());
+        let target: SocketAddr = "127.0.0.1:3333".parse().unwrap();
+        sock.set_peer(target);
+        assert_eq!(sock.peers(), vec![target]);
     }
 }
