@@ -70,6 +70,31 @@ export default function ReceivePanel({ k }: { k: KanamiApi }) {
         </Card>
       )}
 
+      {/* 已授权设备管理。
+          之前只有「允许」没有「撤销」：一旦同意过，那台设备就永久
+          有访问权，用户没有反悔的途径。这是真实的隐私缺口。 */}
+      {k.trusted.length > 0 && (
+        <Card title={S.trustedTitle}>
+          <List
+            dataSource={k.trusted}
+            renderItem={(id) => (
+              <List.Item
+                actions={[
+                  <Button key="revoke" size="small" danger onClick={() => k.revokePeer(id)}>
+                    {S.trustedRevoke}
+                  </Button>,
+                ]}
+              >
+                <Typography.Text style={{ fontSize: 12 }}>{id}</Typography.Text>
+              </List.Item>
+            )}
+          />
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {S.trustedHint}
+          </Typography.Text>
+        </Card>
+      )}
+
       <Card title={S.devicesTitle} extra={<PeerList.Toolbar k={k} />}>
         <PeerList k={k} />
       </Card>

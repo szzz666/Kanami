@@ -571,3 +571,55 @@ fn handle_signal(mut stream: std::net::TcpStream, addr: SocketAddr, ctx: &Signal
         other => log::debug!("忽略信令 {other:?}"),
     }
 }
+
+#[cfg(test)]
+mod stream_id_tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// 复刻 next_stream_id 的逻辑，验证边界。
+    ///
+    /// 单独抽出来是因为 AppState 需要 AppHandle 才能构造，
+    /// 而这段逻辑本身只依赖一个 AtomicU32。
+    fn next(counter: &AtomicU32) -> u16 {
+        let id = counter.fetch_add(1, Ordering::Relaxed);
+        if id == 0 || id > u16::MAX as u32 {
+            counter.store(2, Ordering::Relaxed);
+            return 1;
+        }
+        id as u16
+    }
+
+    /// 正常序列从 1 开始，且不出现 0。
+    ///
+    /// stream_id = 0 在协议里保留给控制消息，音频流用到 0 会与它冲突。
+    #[test]
+    fn 序列从1开始且不出现0() {
+        let c = AtomicU32::new(1);
+        let ids: Vec<u16> = (0..10).map(|_| next(&c)).collect();
+        assert_eq!(ids[0], 1);
+        assert_eq!(ids[9], 10);
+        assert!(!ids.contains(&0), "0 保留给控制消息，绝不能分配给音频流");
+    }
+
+    /// 越过 u16 上限后要回绕到 1，而不是截断或 panic。
+    #[test]
+    fn 越过上限后回绕到1() {
+        // 从 65534 开始：65534、65535、然后回绕
+        let c = AtomicU32::new(65534);
+        assert_eq!(next(&c), 65534);
+        assert_eq!(next(&c), 65535);
+        let wrapped = next(&c);
+        assert_eq!(wrapped, 1, "用满 u16 后必须回到 1");
+        // 回绕后继续正常递增
+        assert_eq!(next(&c), 2);
+    }
+
+    /// 计数器被意外置 0 时也不能返回 0。
+    #[test]
+    fn 计数器为0时不返回0() {
+        let c = AtomicU32::new(0);
+        let id = next(&c);
+        assert_ne!(id, 0, "即使计数器是 0 也不能分配 0 号流");
+        assert_eq!(id, 1);
+    }
+}

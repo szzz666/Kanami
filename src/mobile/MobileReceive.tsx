@@ -75,6 +75,35 @@ export default function MobileReceive({ k }: { k: KanamiApi }) {
         </Card>
       )}
 
+      {/* 已授权设备管理。
+          之前只有「允许」没有「撤销」：一旦同意过，那台设备就永久
+          有访问权，用户没有反悔的途径——只能卸载应用或手删配置文件。 */}
+      {k.trusted.length > 0 && (
+        <Card title={S.trustedTitle}>
+          <List>
+            {k.trusted.map((id) => (
+              <List.Item
+                key={id}
+                extra={
+                  <Button
+                    size="mini"
+                    color="danger"
+                    onClick={() => k.revokePeer(id)}
+                  >
+                    {S.trustedRevoke}
+                  </Button>
+                }
+              >
+                <span style={{ fontSize: 12 }}>{id}</span>
+              </List.Item>
+            ))}
+          </List>
+          <div style={{ fontSize: 12, color: "#86909c", paddingTop: 8 }}>
+            {S.trustedHint}
+          </div>
+        </Card>
+      )}
+
       <Card
         title={S.devicesTitle}
         extra={

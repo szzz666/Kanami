@@ -68,6 +68,14 @@ export const S = {
   pendingApprove: "允许",
   pendingReject: "拒绝",
   pendingHint: "允许后会记住这台设备，下次不再询问",
+  /// 已授权设备管理。
+  ///
+  /// 之前只有「允许」没有「撤销」：一旦同意过，那台设备就永久有访问权，
+  /// 用户没有反悔的途径。这是真实的隐私缺口。
+  trustedTitle: "已授权设备",
+  trustedEmpty: "还没有授权任何设备",
+  trustedRevoke: "撤销",
+  trustedHint: "撤销后该设备需要重新申请接入",
 
   // 统计
   statsLatency: "延迟",

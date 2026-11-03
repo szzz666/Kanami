@@ -46,6 +46,8 @@ export interface KanamiState {
   peers: PeerDto[];
   local: LocalInfo | null;
   pending: PendingRequest[];
+  /** 已授权（永久允许接入）的设备 ID。 */
+  trusted: string[];
   scanning: boolean;
   busy: boolean;
   selectedSource: string;
@@ -62,6 +64,7 @@ export function useKanami() {
     peers: [],
     local: null,
     pending: [],
+    trusted: [],
     scanning: false,
     busy: false,
     selectedSource: "",
@@ -185,24 +188,37 @@ export function useKanami() {
     return () => clearInterval(timer);
   }, []);
 
-  // 轮询授权请求
+  // 轮询授权相关的状态：待确认请求 + 已授权名单。
+  //
+  // 两者一起拉：它们都是「谁能接入本机」的状态，
+  // 用户批准一个设备时两边的变化是联动的（待确认少一个、已授权多一个）。
+  // 分开拉容易看到中间态。
   useEffect(() => {
     if (!inTauri()) return;
-    const timer = setInterval(async () => {
+    const tick = async () => {
       try {
-        const pending = await api.pendingRequests();
-        if (mounted.current) {
-          setState((prev) =>
+        const [pending, trusted] = await Promise.all([
+          api.pendingRequests(),
+          api.trustedPeers(),
+        ]);
+        if (!mounted.current) return;
+        setState((prev) => {
+          const samePending =
             prev.pending.length === pending.length &&
-            prev.pending.every((p, i) => p.device_id === pending[i].device_id)
-              ? prev
-              : { ...prev, pending },
-          );
-        }
+            prev.pending.every((p, i) => p.device_id === pending[i].device_id);
+          const sameTrusted =
+            prev.trusted.length === trusted.length &&
+            prev.trusted.every((t, i) => t === trusted[i]);
+          if (samePending && sameTrusted) return prev;
+          return { ...prev, pending, trusted };
+        });
       } catch {
         /* 后端还没起来时忽略 */
       }
-    }, 1500);
+    };
+    // 立刻跑一次，不然头 1.5 秒列表是空的
+    tick();
+    const timer = setInterval(tick, 1500);
     return () => clearInterval(timer);
   }, []);
 
@@ -379,6 +395,33 @@ export function useKanami() {
     [patch, setError, state.pending],
   );
 
+  /// 刷新已授权名单。
+  const refreshTrusted = useCallback(async () => {
+    try {
+      const trusted = await api.trustedPeers();
+      if (mounted.current) patch({ trusted });
+    } catch {
+      /* 后端还没起来时忽略 */
+    }
+  }, [patch]);
+
+  /// 撤销对某台设备的授权。
+  ///
+  /// 之前只有「允许」没有「撤销」：一旦同意过，那台设备就永久有访问权，
+  /// 用户没有反悔的途径。这是个真实的隐私缺口。
+  const revokePeer = useCallback(
+    async (deviceId: string) => {
+      try {
+        await api.revokePeer(deviceId);
+        await refreshTrusted();
+        await pullStatus();
+      } catch (e) {
+        setError(e);
+      }
+    },
+    [setError, refreshTrusted, pullStatus],
+  );
+
   const rejectPeer = useCallback(
     async (deviceId: string) => {
       try {
@@ -450,6 +493,8 @@ export function useKanami() {
     connectToPeer,
     disconnectPeer,
     approvePeer,
+    revokePeer,
+    refreshTrusted,
     rejectPeer,
     setSourceVolume,
     setSourceMuted,

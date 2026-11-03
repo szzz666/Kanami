@@ -149,6 +149,8 @@ export const api = {
 
   pendingRequests: () => call<PendingRequest[]>("list_pending_requests"),
   approvePeer: (deviceId: string) => call<boolean>("approve_peer", { deviceId }),
+  revokePeer: (deviceId: string) => call<boolean>("revoke_peer", { deviceId }),
+  trustedPeers: () => call<string[]>("list_trusted"),
   rejectPeer: (deviceId: string) => call<boolean>("reject_peer", { deviceId }),
 };
 

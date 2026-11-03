@@ -404,13 +404,24 @@ pub fn disconnect_peer(state: State<'_, AppState>, device_id: String) -> bool {
     // 入口就打日志：如果连这行都看不到，说明前端根本没调到这里，
     // 排查方向就完全不同（UI 事件没触发 vs 后端失败）。
     log::info!("收到断开请求：device_id={device_id}");
-    let Some(addr) = state.connections.lock().remove(&device_id) else {
-        log::warn!("断开失败：{device_id} 不在连接表里");
-        return false;
-    };
-    // 按对端地址找到对应那一路并移除，而不是盲目移除第一路
+
+    // 注意：**不能因为 connections 里没有就直接返回**。
+    //
+    // 两个表是分开维护的：connections 记「这次连接用的对端地址」，
+    // incoming 记「混音台上那一路音源」。理论上同步增删，
+    // 但接收线程异常退出、或某次 add 成功而 insert 失败时，
+    // 可能出现「incoming 有、connections 没有」的残留。
+    //
+    // 原来的写法在这种情况下会提前 return false，
+    // 残留的音源就永远占了混音台一个槽位——用户重连时会发现
+    // 明明断了却显示「2 路」，而且接不了新设备（到上限）。
+    let had_conn = state.connections.lock().remove(&device_id).is_some();
+
+    // 按 device_id 找到对应那一路并移除，而不是盲目移除第一路
     let stream_id =
         state.engine.incoming.lock().iter().find(|s| s.device_id == device_id).map(|s| s.stream_id);
+
+    let mut removed_source = false;
     if let Some(id) = stream_id {
         state.engine.remove_source(id);
         // 清掉输出缓冲里还没播出去的音频。
@@ -418,8 +429,15 @@ pub fn disconnect_peer(state: State<'_, AppState>, device_id: String) -> bool {
         // 不清的话，断开后声音还会继续响将近两秒（环形缓冲约 2 秒），
         // 用户会以为「断开」没生效——实测就是这个现象。
         state.engine.output.clear();
-    } else {
-        let _ = addr;
+        removed_source = true;
+    }
+
+    if !had_conn && !removed_source {
+        log::warn!("断开 {device_id}：连接表和混音台里都没有它");
+        return false;
+    }
+    if !had_conn {
+        log::warn!("断开 {device_id}：连接表里没有，但混音台残留了一路，已清理");
     }
 
     // 没有任何音源了就把前台服务停掉，别让通知栏一直挂着
@@ -507,6 +525,39 @@ pub fn approve_peer(app: tauri::AppHandle, state: State<'_, AppState>, device_id
 pub fn reject_peer(state: State<'_, AppState>, device_id: String) -> bool {
     state.pending.lock().retain(|p| p.device_id != device_id);
     true
+}
+
+/// 撤销对某台播放端的授权。
+///
+/// 之前只有 approve 没有 revoke：一旦允许过，那台设备就永久有访问权。
+/// 这是个真实的隐私缺口——用户没有反悔的途径，
+/// 只能靠「卸载应用」或「手动删配置文件」。
+///
+/// 撤销后如果它正在连着，一并断开：授权没了，连接也不该继续。
+#[tauri::command]
+pub fn revoke_peer(app: tauri::AppHandle, state: State<'_, AppState>, device_id: String) -> bool {
+    let removed = state.trusted.lock().remove(&device_id);
+    if removed {
+        crate::persist::save_trusted(&app, &state.trusted.lock());
+        log::info!("已撤销 {device_id} 的授权");
+    } else {
+        log::info!("撤销 {device_id}：本来就没授权过");
+    }
+
+    // 授权撤销后，正在进行的连接也要断掉。
+    // 否则用户点了「撤销」，对方还在出声，看起来像没生效。
+    if state.connections.lock().contains_key(&device_id) {
+        let _ = disconnect_peer(state, device_id);
+    }
+    removed
+}
+
+/// 当前已授权（永久允许接入）的设备列表。
+#[tauri::command]
+pub fn list_trusted(state: State<'_, AppState>) -> Vec<String> {
+    let mut out: Vec<String> = state.trusted.lock().iter().cloned().collect();
+    out.sort();
+    out
 }
 
 #[tauri::command]

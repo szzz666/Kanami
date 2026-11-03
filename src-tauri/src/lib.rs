@@ -147,6 +147,8 @@ pub fn run() {
             commands::set_source_solo,
             commands::approve_peer,
             commands::reject_peer,
+            commands::revoke_peer,
+            commands::list_trusted,
             commands::list_pending_requests,
         ])
         .run(tauri::generate_context!())
