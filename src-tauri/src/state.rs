@@ -327,6 +327,13 @@ impl AppState {
 
         serde_json::json!({
             "sending": engine_status.sending,
+            // 采集健康状态。
+            //
+            // 之前完全没暴露：CaptureStats.failed 被 13 处代码设置、
+            // 从来没被读过。设备被占用、权限不足、采集助手崩溃时，
+            // 用户看到的是「正在发送」+ 一片静音，无从判断原因。
+            "capture_failed": engine_status.capture_failed,
+            "capture_frames": engine_status.capture_frames,
             "receiving": engine_status.receiving,
             "source_count": engine_status.source_count,
             "outgoing_frames": engine_status.outgoing_frames,

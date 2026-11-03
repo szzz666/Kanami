@@ -408,6 +408,14 @@ pub struct EngineStatus {
     pub sample_rate: u32,
     pub mode: QualityMode,
     pub output_latency_ms: u32,
+    /// 采集是否出错。
+    ///
+    /// 这个字段之前不存在，于是 CaptureStats.failed 被 13 处代码设置、
+    /// 却从来没有被读过——设备被占用、权限不足、采集助手崩溃，
+    /// 用户看到的都是「正在发送」+ 一片静音，完全无从判断。
+    pub capture_failed: bool,
+    /// 已经采到的帧数。长时间停在 0 说明采集没真正启动。
+    pub capture_frames: u64,
 }
 
 /// 引擎持有的所有运行时状态。
@@ -508,6 +516,7 @@ impl Engine {
     pub fn status(&self) -> EngineStatus {
         let incoming = self.incoming.lock();
         let outgoing = self.outgoing.lock();
+        let capture = self.capture.lock();
         EngineStatus {
             sending: outgoing.is_some(),
             receiving: !incoming.is_empty(),
@@ -531,6 +540,18 @@ impl Engine {
                 .iter()
                 .map(|s| s.buffer_ms.load(Ordering::Relaxed))
                 .max()
+                .unwrap_or(0),
+            // 从采集会话里读健康状态。
+            //
+            // CaptureSession 自己就持有 Arc<CaptureStats>，不需要 Engine
+            // 另外存一份——之前就是因为没读它，失败信号被白白丢掉。
+            capture_failed: capture
+                .as_ref()
+                .map(|s| s.stats.failed.load(Ordering::Relaxed))
+                .unwrap_or(false),
+            capture_frames: capture
+                .as_ref()
+                .map(|s| s.stats.frames.load(Ordering::Relaxed))
                 .unwrap_or(0),
         }
     }
@@ -654,5 +675,51 @@ mod mode_switch_tests {
         let engine = Engine::new();
         engine.set_receive_mode(QualityMode::HighQuality);
         assert!(engine.incoming.lock().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod capture_health_tests {
+    use super::*;
+
+    /// 没有采集会话时，健康状态应当是「没有失败、0 帧」。
+    #[test]
+    fn 未采集时状态干净() {
+        let engine = Engine::new();
+        let s = engine.status();
+        assert!(!s.capture_failed);
+        assert_eq!(s.capture_frames, 0);
+    }
+
+    /// 采集失败标志必须能从 status 读出来。
+    ///
+    /// 这条锁住一个系统性缺口：CaptureStats.failed 被 13 处代码设置，
+    /// 但 EngineStatus 里根本没有对应字段，前端也就无从展示。
+    /// 结果是设备被占用、权限不足时，用户看到「正在发送」+ 静音。
+    #[test]
+    fn 采集失败能从状态读出() {
+        let engine = Engine::new();
+        let stats = Arc::new(crate::capture::CaptureStats::default());
+        stats.failed.store(true, Ordering::Relaxed);
+        stats.frames.store(42, Ordering::Relaxed);
+
+        let source = crate::capture::CaptureSource {
+            id: "test".into(),
+            name: "测试".into(),
+            kind: crate::capture::CaptureKind::Microphone,
+            sample_rate: 48000,
+            channels: 2,
+            is_default: true,
+        };
+        *engine.capture.lock() = Some(crate::capture::CaptureSession::new(
+            source,
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&stats),
+            Box::new(()),
+        ));
+
+        let s = engine.status();
+        assert!(s.capture_failed, "失败标志必须透传到 status");
+        assert_eq!(s.capture_frames, 42, "帧数也要能读到");
     }
 }

@@ -80,6 +80,10 @@ export interface IncomingSourceDto {
 
 export interface StatusSnapshot {
   sending: boolean;
+  /** 采集出错（设备占用、权限不足、采集助手崩溃等）。 */
+  capture_failed: boolean;
+  /** 已采到的帧数。长时间停在 0 说明采集没真正启动。 */
+  capture_frames: number;
   receiving: boolean;
   source_count: number;
   outgoing_frames: number;

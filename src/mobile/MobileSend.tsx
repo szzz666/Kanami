@@ -14,6 +14,18 @@ export default function MobileSend({ k }: { k: KanamiApi }) {
 
   return (
     <Space direction="vertical" style={{ width: "100%", "--gap": "12px" } as never}>
+      {/* 采集失败必须显眼地告诉用户。
+          之前 CaptureStats.failed 被 13 处代码设置却没人读：
+          设备被占用、权限不足、采集助手崩溃时，
+          界面上照样显示「正在发送」——用户只会觉得软件坏了。 */}
+      {running && k.status.capture_failed && (
+        <NoticeBar
+          content="采集出错，对方收不到声音。请检查设备占用或权限设置，然后重新开始发送。"
+          color="error"
+          wrap
+        />
+      )}
+
       {k.platform && !k.platform.process_exclusion && (
         <NoticeBar
           content="本机同时收发时可能产生回授，建议戴耳机"

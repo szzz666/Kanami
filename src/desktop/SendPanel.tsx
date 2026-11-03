@@ -60,6 +60,19 @@ export default function SendPanel({ k }: { k: KanamiApi }) {
         ]}
       >
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          {/* 采集失败必须显眼地告诉用户。
+              之前 CaptureStats.failed 被 13 处代码设置却没人读：
+              设备被占用、权限不足、采集助手崩溃时，
+              界面上照样显示「正在发送」——用户只会觉得软件坏了。 */}
+          {running && k.status.capture_failed && (
+            <Alert
+              type="error"
+              showIcon
+              message="采集出错，对方收不到声音"
+              description="请检查音频设备是否被其它程序占用，或权限是否已授予，然后重新开始发送。"
+            />
+          )}
+
           {/* 平台限制说明。
               这些文案后端早就生成了（macOS 的屏幕录制授权、Windows 的
               回授提示、Linux 的 PulseAudio 检查、Android 的采集限制），

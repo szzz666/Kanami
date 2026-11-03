@@ -115,25 +115,32 @@ impl CaptureBackend for MacCaptureBackend {
         let source = source.clone();
         let stats_thread = Arc::clone(&stats);
 
-        let helper = Self::find_helper();
-        if helper.is_none() {
-            log::warn!("未找到采集助手 kanami-capture，将以静音模式运行");
-        }
+        // 没有采集助手就直接失败，**不能降级成静音**。
+        //
+        // 之前这里是「warn 一下然后 run_silent」，结果是：
+        // start_sending 返回成功、界面显示「正在发送」、
+        // 对端连上来也握手成功，但传过去的是纯静音。
+        // 用户完全无从判断——这和 Windows 之前那个空实现是同一类问题。
+        //
+        // 采集助手是打包进 .app 的，找不到说明安装损坏或构建没带上，
+        // 属于必须让用户知道的故障，不是可以静默降级的场景。
+        let helper = Self::find_helper().ok_or_else(|| {
+            anyhow::anyhow!("找不到采集助手 kanami-capture。应用可能安装不完整，请重新安装。")
+        })?;
 
         std::thread::Builder::new().name("kanami-macos-capture".into()).spawn(move || {
-            let mut child: Option<Child> = match &helper {
-                Some(path) => Command::new(path)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .map_err(|e| log::error!("启动采集助手失败：{e}"))
-                    .ok(),
-                None => None,
-            };
+            let mut child: Option<Child> = Command::new(&helper)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| log::error!("启动采集助手失败：{e}"))
+                .ok();
 
             let Some(ref mut proc) = child else {
-                // 没有助手：保持静音节拍，让上层链路仍能跑通
-                run_silent(&stop_flag, &stats_thread, &mut on_samples);
+                // 助手存在但启动失败（权限、二进制损坏）。
+                // 同样不能装成功——标记失败让上层报错。
+                log::error!("采集助手启动失败，无法采集");
+                stats_thread.failed.store(true, Ordering::Relaxed);
                 return;
             };
 
@@ -208,20 +215,5 @@ impl CaptureBackend for MacCaptureBackend {
 
     fn supports_process_exclusion(&self) -> bool {
         true
-    }
-}
-
-/// 没有采集助手时的降级：维持静音节拍，保证链路时序与生命周期正确。
-fn run_silent(
-    stop: &Arc<std::sync::atomic::AtomicBool>,
-    stats: &Arc<CaptureStats>,
-    on_samples: &mut CaptureCallback,
-) {
-    let period = std::time::Duration::from_millis(10);
-    while !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(period);
-        let block = vec![0.0f32; (SAMPLE_RATE as usize / 100) * CHANNELS];
-        stats.frames.fetch_add(1, Ordering::Relaxed);
-        on_samples(&block);
     }
 }

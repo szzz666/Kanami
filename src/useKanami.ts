@@ -19,6 +19,8 @@ import {
 
 const EMPTY_STATUS: StatusSnapshot = {
   sending: false,
+  capture_failed: false,
+  capture_frames: 0,
   receiving: false,
   source_count: 0,
   outgoing_frames: 0,
