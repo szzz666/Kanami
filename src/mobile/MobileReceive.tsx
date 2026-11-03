@@ -8,6 +8,7 @@ import {
   Tag,
   Space,
   Input,
+  NoticeBar,
   Toast,
 } from "antd-mobile";
 import { AddOutline, RedoOutline } from "antd-mobile-icons";
@@ -23,6 +24,18 @@ export default function MobileReceive({ k }: { k: KanamiApi }) {
 
   return (
     <Space direction="vertical" style={{ width: "100%", "--gap": "12px" } as never}>
+      {/* 播放设备出错必须显眼提示。
+          cpal 的 error callback 会把设备被拔出、格式不支持记到
+          OutputHealth.failed——但之前没有任何地方读它，
+          用户只看到「界面一切正常，就是没声音」。 */}
+      {sources.length > 0 && k.status.playback_failed && (
+        <NoticeBar
+          content="播放设备出错，本机听不到声音。请检查音频输出设备是否可用（是否被拔出或被其它程序占用）。"
+          color="error"
+          wrap
+        />
+      )}
+
       {/* 待确认的接入请求。
           这一块必须有：播放端连上来时服务端会回 Reject(NotTrusted)，
           等本机批准后才放行。没有这个入口，用户看到的就是

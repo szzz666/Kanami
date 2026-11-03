@@ -334,6 +334,15 @@ impl AppState {
             // 用户看到的是「正在发送」+ 一片静音，无从判断原因。
             "capture_failed": engine_status.capture_failed,
             "capture_frames": engine_status.capture_frames,
+            // 播放侧健康。同构问题：OutputHealth.failed 会被 cpal 的
+            // error callback 设置，但从来没人读，表现是「界面正常但没声音」。
+            "playback_failed": engine_status.playback_failed,
+            "playback_callbacks": engine_status.playback_callbacks,
+            // 实际发出的包数。与 outgoing_frames 对比能看出
+            // 「编码了但没发出去」——AudioSocket 没学到对端地址时
+            // send 返回 Ok(false) 且不计数。
+            "packets_sent": engine_status.packets_sent,
+            "bytes_sent": engine_status.bytes_sent,
             "receiving": engine_status.receiving,
             "source_count": engine_status.source_count,
             "outgoing_frames": engine_status.outgoing_frames,

@@ -84,6 +84,14 @@ export interface StatusSnapshot {
   capture_failed: boolean;
   /** 已采到的帧数。长时间停在 0 说明采集没真正启动。 */
   capture_frames: number;
+  /** 播放设备出错（被拔出、格式不支持等）。 */
+  playback_failed: boolean;
+  /** 播放回调累计次数。不增长说明声卡没在拉数据。 */
+  playback_callbacks: number;
+  /** 实际发出的 UDP 包数。与 outgoing_frames 差异大说明包没发出去。 */
+  packets_sent: number;
+  /** 累计发出的字节数。 */
+  bytes_sent: number;
   receiving: boolean;
   source_count: number;
   outgoing_frames: number;

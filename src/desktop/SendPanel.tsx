@@ -137,10 +137,25 @@ export default function SendPanel({ k }: { k: KanamiApi }) {
 
           {running && (
             <Row gutter={16}>
-              <Col span={12}>
-                <Statistic title="已发送帧" value={k.status.outgoing_frames} />
+              <Col span={8}>
+                <Statistic title="编码帧" value={k.status.outgoing_frames} />
               </Col>
-              <Col span={12}>
+              {/* 同时显示「编码帧」和「实际发出包」。
+                  两者长期不等说明包没发出去——典型原因是音源端
+                  还没学到播放端地址（AudioSocket 此时 send 返回
+                  Ok(false) 且不计数）。只显示帧数的话看不出这个问题。 */}
+              <Col span={8}>
+                <Statistic
+                  title="发出包"
+                  value={k.status.packets_sent}
+                  valueStyle={
+                    k.status.outgoing_frames > 0 && k.status.packets_sent === 0
+                      ? { color: "#cf1322" }
+                      : undefined
+                  }
+                />
+              </Col>
+              <Col span={8}>
                 <Statistic title="音频端口" value={k.status.audio_port} />
               </Col>
             </Row>

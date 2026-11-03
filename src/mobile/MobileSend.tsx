@@ -101,8 +101,29 @@ export default function MobileSend({ k }: { k: KanamiApi }) {
               )}
             </div>
           </List.Item>
+          {/* 同时显示「编码帧」和「实际发出包」。
+              两者长期不等说明包没发出去——典型原因是音源端还没
+              学到播放端地址（AudioSocket 此时 send 返回 Ok(false)
+              且不计数）。只显示帧数的话完全看不出这个问题。 */}
           {running && (
-            <List.Item extra={k.status.outgoing_frames}>已发送帧</List.Item>
+            <>
+              <List.Item extra={k.status.outgoing_frames}>编码帧</List.Item>
+              <List.Item
+                extra={
+                  <span
+                    style={
+                      k.status.outgoing_frames > 0 && k.status.packets_sent === 0
+                        ? { color: "#d4380d", fontWeight: 600 }
+                        : undefined
+                    }
+                  >
+                    {k.status.packets_sent}
+                  </span>
+                }
+              >
+                发出包
+              </List.Item>
+            </>
           )}
         </List>
 

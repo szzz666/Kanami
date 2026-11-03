@@ -86,8 +86,18 @@ impl SharedOutput {
         self.health.callbacks.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// 输出设备是否出过错。
+    ///
+    /// cpal 的 error callback 会把设备被拔出、格式不被支持这类问题
+    /// 记到 health.failed 上——但之前没有任何地方读它。
+    /// 表现是「界面一切正常，就是没声音」。
     pub fn failed(&self) -> bool {
         self.health.failed.load(Ordering::Relaxed)
+    }
+
+    /// 输出回调累计次数。长时间不增长说明声卡没在拉数据。
+    pub fn callback_count(&self) -> u32 {
+        self.health.callbacks.load(Ordering::Relaxed)
     }
 
     pub fn mark_failed(&self) {
@@ -416,6 +426,21 @@ pub struct EngineStatus {
     pub capture_failed: bool,
     /// 已经采到的帧数。长时间停在 0 说明采集没真正启动。
     pub capture_frames: u64,
+    /// 播放设备是否出过错（被拔出、格式不支持等）。
+    ///
+    /// 与采集侧同构的问题：OutputHealth.failed 会被 cpal 的
+    /// error callback 设置，但从来没人读。表现是「界面正常但没声音」。
+    pub playback_failed: bool,
+    /// 播放回调累计次数。不增长说明声卡没在拉数据。
+    pub playback_callbacks: u32,
+    /// 实际发出的 UDP 包数。
+    ///
+    /// 与 outgoing_frames 的区别：那是「编码了几帧」，这是
+    /// 「真正发出去几个包」。AudioSocket::send 在没有对端地址时
+    /// 返回 Ok(false) 且不计数——两者长时间不等说明包没发出去。
+    pub packets_sent: u64,
+    /// 累计发出的字节数。
+    pub bytes_sent: u64,
 }
 
 /// 引擎持有的所有运行时状态。
@@ -552,6 +577,25 @@ impl Engine {
             capture_frames: capture
                 .as_ref()
                 .map(|s| s.stats.frames.load(Ordering::Relaxed))
+                .unwrap_or(0),
+            // 播放侧健康。OutputHealth.failed 会被 cpal 的 error callback
+            // 设置（设备拔出、格式不支持），callback 计数则反映声卡
+            // 是否真在拉数据。两者之前都没人读。
+            playback_failed: self.output.failed(),
+            playback_callbacks: self.output.callback_count(),
+            // 发送侧链路统计。
+            //
+            // LinkStats 里有 7 个字段一直在被更新，但从来没人读过。
+            // 最关键的是 packets_sent：它和 outgoing_frames 的差异能
+            // 直接暴露「编码了但没发出去」——AudioSocket 没学到对端
+            // 地址时 send 返回 Ok(false) 且不计数。
+            packets_sent: outgoing
+                .as_ref()
+                .map(|o| o.socket.stats().packets_sent.load(Ordering::Relaxed))
+                .unwrap_or(0),
+            bytes_sent: outgoing
+                .as_ref()
+                .map(|o| o.socket.stats().bytes_sent.load(Ordering::Relaxed))
                 .unwrap_or(0),
         }
     }
@@ -721,5 +765,76 @@ mod capture_health_tests {
         let s = engine.status();
         assert!(s.capture_failed, "失败标志必须透传到 status");
         assert_eq!(s.capture_frames, 42, "帧数也要能读到");
+    }
+}
+
+#[cfg(test)]
+mod playback_health_tests {
+    use super::*;
+
+    /// 新引擎的播放状态应当是干净的。
+    #[test]
+    fn 初始播放状态干净() {
+        let engine = Engine::new();
+        let s = engine.status();
+        assert!(!s.playback_failed);
+        assert_eq!(s.playback_callbacks, 0);
+    }
+
+    /// 播放失败标志必须能从 status 读出来。
+    ///
+    /// 锁住同构缺口：OutputHealth.failed 会被 cpal 的 error callback
+    /// 设置（设备拔出、格式不支持），但 EngineStatus 里没有对应字段，
+    /// 前端也就无从展示——用户只看到「界面正常但没声音」。
+    #[test]
+    fn 播放失败能从状态读出() {
+        let engine = Engine::new();
+        engine.output.mark_failed();
+        assert!(engine.status().playback_failed, "失败标志必须透传到 status");
+    }
+
+    /// 回调计数要能反映声卡确实在拉数据。
+    #[test]
+    fn 回调计数会增长() {
+        let engine = Engine::new();
+        assert_eq!(engine.status().playback_callbacks, 0);
+        engine.output.note_callback(2);
+        engine.output.note_callback(2);
+        assert_eq!(engine.status().playback_callbacks, 2);
+    }
+}
+
+#[cfg(test)]
+mod link_stats_tests {
+    use super::*;
+
+    /// 没在发送时，链路统计应当是 0。
+    #[test]
+    fn 未发送时统计为零() {
+        let engine = Engine::new();
+        let s = engine.status();
+        assert_eq!(s.packets_sent, 0);
+        assert_eq!(s.bytes_sent, 0);
+    }
+
+    /// 没有对端时 send 不计数 —— 这是 packets_sent 的诊断价值所在。
+    ///
+    /// 锁住缺口：LinkStats 里 7 个字段一直在被更新，但从来没被读过。
+    /// 最关键的是 packets_sent 与 outgoing_frames 的差异：
+    /// AudioSocket 没学到对端地址时 send 返回 Ok(false) 且不计数，
+    /// 于是「编码帧在涨、发出包不动」——正是「包发不出去」的直接证据。
+    #[test]
+    fn 无对端时发送不计数() {
+        let sock = kanami_net::audio_socket::AudioSocket::bind(0, 1).expect("绑定失败");
+        let stats = sock.stats();
+        assert_eq!(stats.packets_sent.load(Ordering::Relaxed), 0);
+        // 没有对端，send 返回 false 且不应增加计数
+        let sent = sock.send(kanami_proto::PacketKind::Audio, 0, 0, &[1, 2, 3]).unwrap();
+        assert!(!sent, "没有对端时必须如实返回未发出");
+        assert_eq!(
+            stats.packets_sent.load(Ordering::Relaxed),
+            0,
+            "未发出的包不应计入 packets_sent，否则掩盖了发不出去的问题"
+        );
     }
 }

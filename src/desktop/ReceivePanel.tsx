@@ -1,4 +1,5 @@
 import {
+  Alert,
   Button,
   Card,
   Empty,
@@ -22,6 +23,19 @@ export default function ReceivePanel({ k }: { k: KanamiApi }) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      {/* 播放设备出错必须显眼提示。
+          cpal 的 error callback 会把设备被拔出、格式不支持记到
+          OutputHealth.failed——但之前没有任何地方读它，
+          用户只看到「界面一切正常，就是没声音」。 */}
+      {sources.length > 0 && k.status.playback_failed && (
+        <Alert
+          type="error"
+          showIcon
+          message="播放设备出错，本机听不到声音"
+          description="请检查音频输出设备是否可用（是否被拔出、或被其它程序独占），必要时重新连接。"
+        />
+      )}
+
       {/* 待确认的接入请求。
           播放端连上来时服务端回 Reject(NotTrusted)，必须本机批准才放行。
           没有这个入口，用户看到的就是「对方一直连不上」，
