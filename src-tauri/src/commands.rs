@@ -97,7 +97,11 @@ pub fn list_output_devices() -> Vec<OutputDeviceDto> {
 
 /// 开始发送：绑定端口、启动采集、开始编码。
 #[tauri::command]
-pub fn start_sending(state: State<'_, AppState>, source_id: String) -> Result<(), String> {
+pub fn start_sending(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    source_id: String,
+) -> Result<(), String> {
     let engine = &state.engine;
 
     // 已在发送就不重复启动
@@ -137,17 +141,26 @@ pub fn start_sending(state: State<'_, AppState>, source_id: String) -> Result<()
     *engine.capture.lock() = Some(session);
     engine.running.store(true, Ordering::Relaxed);
     log::info!("开始发送，音源={} 端口={}", source.name, port);
+
+    // 记住「正在发送」。进程被系统回收后能自动恢复，
+    // 用户不用重新打开应用去点按钮（他可能根本看不到屏幕）。
+    crate::persist::save_session(
+        &app,
+        &crate::persist::SessionState { sending: true, source: source.id.clone() },
+    );
     Ok(())
 }
 
 #[tauri::command]
-pub fn stop_sending(state: State<'_, AppState>) -> Result<(), String> {
+pub fn stop_sending(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     if let Some(session) = state.engine.capture.lock().take() {
         session.stop();
     }
     *state.engine.outgoing.lock() = None;
     state.engine.running.store(false, Ordering::Relaxed);
     state.audio_port.store(0, Ordering::Relaxed);
+    // 用户主动停止，记住这个意图：下次启动不要自作主张恢复
+    crate::persist::save_session(&app, &crate::persist::SessionState::default());
     Ok(())
 }
 

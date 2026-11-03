@@ -17,11 +17,79 @@ use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 const FILE_NAME: &str = "trusted.json";
+const SESSION_FILE: &str = "session.json";
 
 /// 持久化文件路径。拿不到就返回 None，调用方静默跳过。
 fn path(app: &AppHandle) -> Option<PathBuf> {
     let dir = app.path().app_data_dir().ok()?;
     Some(dir.join(FILE_NAME))
+}
+
+/// 会话文件路径。
+fn session_path(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_data_dir().ok()?;
+    Some(dir.join(SESSION_FILE))
+}
+
+/// 上次退出时是否正在发送，以及用的哪个音源。
+///
+/// 为什么要存：这个应用的使用场景是「手机当无线音箱」。
+/// 用户放进口袋、锁屏几小时，系统很可能把进程回收掉。
+/// 不恢复的话，用户回来要重新打开应用、选音源、点发送——
+/// 而这时他可能根本看不到屏幕。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct SessionState {
+    /// 是否在发送。
+    pub sending: bool,
+    /// 音源 id（"mic" / "system" / "device:xxx"）。
+    pub source: String,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self { sending: false, source: String::new() }
+    }
+}
+
+/// 读回上次的会话状态。
+///
+/// 文件不存在、损坏、没权限——都当作「没在发送」，不能让启动失败。
+pub fn load_session(app: &AppHandle) -> SessionState {
+    let Some(p) = session_path(app) else { return SessionState::default() };
+    let Ok(text) = std::fs::read_to_string(&p) else {
+        return SessionState::default();
+    };
+    match serde_json::from_str::<SessionState>(&text) {
+        Ok(s) => {
+            if s.sending {
+                log::info!("上次在发送（音源={}），将尝试恢复", s.source);
+            }
+            s
+        }
+        Err(e) => {
+            log::warn!("会话状态解析失败（当作未发送）：{e}");
+            SessionState::default()
+        }
+    }
+}
+
+/// 写入会话状态。失败只记日志。
+pub fn save_session(app: &AppHandle, state: &SessionState) {
+    let Some(p) = session_path(app) else { return };
+    if let Some(dir) = p.parent() {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            log::warn!("创建数据目录失败：{e}");
+            return;
+        }
+    }
+    match serde_json::to_string_pretty(state) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(&p, text) {
+                log::warn!("保存会话状态失败：{e}");
+            }
+        }
+        Err(e) => log::warn!("序列化会话状态失败：{e}"),
+    }
 }
 
 /// 读回已授权的设备 ID。
@@ -106,5 +174,47 @@ mod tests {
         assert_eq!(text, "[]");
         let back: Vec<String> = serde_json::from_str(&text).unwrap();
         assert!(back.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    /// 序列化格式要稳定。
+    ///
+    /// 这条锁住「格式悄悄变了导致老用户发送状态失效」的风险。
+    #[test]
+    fn 会话状态往返一致() {
+        let s = SessionState { sending: true, source: "system".into() };
+        let text = serde_json::to_string(&s).unwrap();
+        let back: SessionState = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, s);
+    }
+
+    /// 默认状态必须是「没在发送」。
+    ///
+    /// 这条很重要：如果默认值反了，应用第一次启动就会**自动开始采集**，
+    /// 用户的麦克风在不知情的情况下被打开——这是隐私事故。
+    #[test]
+    fn 默认是未发送() {
+        let s = SessionState::default();
+        assert!(!s.sending);
+        assert!(s.source.is_empty());
+    }
+
+    /// 损坏的文件按未发送处理。
+    #[test]
+    fn 损坏的会话文件不影响启动() {
+        let bad = "{ not json";
+        let r: Result<SessionState, _> = serde_json::from_str(bad);
+        assert!(r.is_err());
+    }
+
+    /// 缺字段也要能解析（老版本文件没有 source 字段的情形）。
+    #[test]
+    fn 缺字段时用默认值() {
+        let r: Result<SessionState, _> = serde_json::from_str("{}");
+        assert!(r.is_err(), "缺 sending 字段时应当报错而不是猜一个值");
     }
 }

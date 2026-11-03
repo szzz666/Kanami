@@ -85,6 +85,36 @@ pub fn run() {
                 started_flag.player_started.store(true, std::sync::atomic::Ordering::Relaxed);
             }
 
+            // 恢复上次的发送状态。
+            //
+            // 这个应用的使用场景是「手机当无线音箱」：用户放进口袋、
+            // 锁屏几小时，系统很可能把进程回收掉。不恢复的话，
+            // 用户回来要重新打开应用、选音源、点发送——
+            // 而这时他可能根本看不到屏幕。
+            //
+            // 放在播放线程之后：采集要往 capture_ring 里写，
+            // 混音线程得先就绪。
+            {
+                let session = persist::load_session(&handle);
+                if session.sending && !session.source.is_empty() {
+                    let h = handle.clone();
+                    std::thread::Builder::new().name("kanami-restore".into()).spawn(move || {
+                        // 稍等一拍，等主循环和采集后端都就绪
+                        std::thread::sleep(Duration::from_millis(800));
+                        let st = h.state::<AppState>();
+                        match commands::start_sending(h.clone(), st, session.source.clone()) {
+                            Ok(()) => log::info!("已恢复上次的发送（音源={}）", session.source),
+                            Err(e) => {
+                                // 恢复失败不致命：可能设备没有那个音源了。
+                                // 记日志并把状态清掉，避免下次还试。
+                                log::warn!("恢复发送失败：{e}（可能需要手动重新开始）");
+                                persist::save_session(&h, &persist::SessionState::default());
+                            }
+                        }
+                    })?;
+                }
+            }
+
             // 后台维护线程：发现广播、保活、混音节拍
             let handle_bg = handle.clone();
             std::thread::Builder::new().name("kanami-mainloop".into()).spawn(move || loop {

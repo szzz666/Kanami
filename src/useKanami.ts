@@ -147,6 +147,38 @@ export function useKanami() {
     return () => unlisten?.();
   }, []);
 
+  // 周期性拉一次完整状态。
+  //
+  // 事件推送是主要来源，但它有两个问题：
+  // 1. 后端可能在前端挂载**之后**才改变状态——比如进程被系统回收后
+  //    重启，自动恢复发送要等采集起来（数秒）。前端首帧拉到的是
+  //    「未在发送」，之后如果没有新事件，界面就一直停在错的状态。
+  // 2. 事件在 Android WebView 上偶尔会丢。
+  //
+  // 3 秒一轮，代价很小（一次 IPC + 一个几百字节的 JSON），
+  // 换来的是界面永远不会长期显示错误状态。
+  useEffect(() => {
+    if (!inTauri()) return;
+    const timer = setInterval(() => {
+      if (!mounted.current) return;
+      api
+        .status()
+        .then((s) => {
+          if (!mounted.current) return;
+          setState((prev) => {
+            const next: typeof prev.status = { ...EMPTY_STATUS, ...prev.status, ...s };
+            if (!Array.isArray(next.sources)) next.sources = prev.status.sources;
+            if (typeof next.source_count !== "number") next.source_count = next.sources.length;
+            return { ...prev, status: next, mode: next.mode || prev.mode };
+          });
+        })
+        .catch(() => {
+          /* 后端暂时不可用时忽略 */
+        });
+    }, 3000);
+    return () => clearInterval(timer);
+  }, []);
+
   // 轮询授权请求
   useEffect(() => {
     if (!inTauri()) return;
