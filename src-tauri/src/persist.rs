@@ -46,6 +46,11 @@ pub struct SessionState {
 }
 
 impl Default for SessionState {
+    // 刻意保留显式实现（而不是 #[derive(Default)]）：
+    // 「默认未发送」是这个类型的核心安全属性——反了的话，
+    // 应用第一次启动就会自动打开麦克风，是隐私事故。
+    // 显式写出来 + 有测试锁住，比一个 derive 更能表达这个意图。
+    #[allow(clippy::derivable_impls)]
     fn default() -> Self {
         Self { sending: false, source: String::new() }
     }
