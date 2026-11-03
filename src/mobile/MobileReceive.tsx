@@ -147,7 +147,12 @@ export default function MobileReceive({ k }: { k: KanamiApi }) {
             {sources.map((s) => (
               <List.Item
                 key={s.stream_id}
-                description={`${s.mode} · 缓冲 ${s.buffer_ms}ms · 延迟 ${s.synced ? `${s.latency_ms}ms` : "同步中"}`}
+                description={
+                  `${s.mode} · 缓冲 ${s.buffer_ms}ms · 延迟 ${s.synced ? `${s.latency_ms}ms` : "同步中"}` +
+                  // 欠载 = 听到的断续。低延迟档缓冲固定 20ms，网络一抖就欠载，
+                  // 不显示的话用户只会觉得「这软件断断续续」，无从判断原因。
+                  (s.underruns > 0 ? ` · 断续 ${s.underruns} 次` : "")
+                }
               >
                 <div style={{ width: "100%" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>

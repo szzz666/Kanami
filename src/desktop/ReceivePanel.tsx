@@ -91,6 +91,14 @@ export default function ReceivePanel({ k }: { k: KanamiApi }) {
                       <span style={{ color: "#86909c" }}>同步中</span>
                     )}
                     {" · "}包 {s.packets} · 丢 {s.lost}
+                    {/* 欠载 = 听感断续。低延迟档缓冲固定 20ms，网络一抖就欠载。
+                        不显示的话用户只听到断音，会怀疑设备坏了。 */}
+                    {s.underruns > 0 && (
+                      <>
+                        {" · "}
+                        <span style={{ color: "#d4380d" }}>断续 {s.underruns}</span>
+                      </>
+                    )}
                   </div>
                 </div>
                 <Slider

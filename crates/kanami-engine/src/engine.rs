@@ -298,6 +298,20 @@ impl IncomingSource {
         self.jitter.stats().lost
     }
 
+    /// 累计欠载次数：该出帧了但缓冲不够，导致静音。
+    ///
+    /// 这是「听感断续」的直接指标。低延迟档缓冲固定 20ms，
+    /// 网络一抖就会欠载——用户听到的是断音，但界面上之前
+    /// 完全看不到原因，只能怀疑设备坏了。
+    pub fn underrun_count(&self) -> u64 {
+        self.jitter.stats().underruns
+    }
+
+    /// 累计晚到被丢弃的包数。
+    pub fn late_count(&self) -> u64 {
+        self.jitter.stats().late
+    }
+
     /// 单帧样本数（按当前模式）。
     fn decoder_frame_samples(&self) -> usize {
         self.mode.params().samples_per_frame()

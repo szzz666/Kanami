@@ -296,6 +296,10 @@ impl AppState {
                     "mode": s.mode.name(),
                     "packets": s.packets.load(Ordering::Relaxed),
                     "lost": s.lost_count(),
+                    // 欠载 = 听感断续。低延迟档缓冲固定 20ms，网络一抖就欠载。
+                    // 不回传的话用户只听到断音，界面上看不出任何原因。
+                    "underruns": s.underrun_count(),
+                    "late": s.late_count(),
                     "buffer_ms": s.buffer_ms.load(Ordering::Relaxed),
                     "latency_ms": latency,
                     "synced": latency >= 0,

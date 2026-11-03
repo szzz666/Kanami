@@ -60,6 +60,10 @@ export interface IncomingSourceDto {
   mode: string;
   packets: number;
   lost: number;
+  /** 欠载次数：该出帧时缓冲不够，导致静音。听感上就是断续。 */
+  underruns: number;
+  /** 晚到被丢弃的包数。 */
+  late: number;
   buffer_ms: number;
   /** 端到端延迟（毫秒）。-1 表示时钟尚未同步。 */
   latency_ms: number;

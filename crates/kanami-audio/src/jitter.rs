@@ -211,3 +211,68 @@ impl JitterBuffer {
         a.wrapping_sub(b) > u32::MAX / 2
     }
 }
+
+#[cfg(test)]
+mod underrun_tests {
+    use super::*;
+    use kanami_proto::QualityMode;
+
+    /// 欠载必须被计数。
+    ///
+    /// 这条锁住「听感断续但界面上看不到原因」的缺陷：
+    /// 低延迟档缓冲固定 20ms，网络一抖就欠载，
+    /// 用户听到断音却无从判断是设备坏了还是网络问题。
+    #[test]
+    fn 播放开始后的缓冲不足才计欠载() {
+        let params = QualityMode::LowLatency.params();
+        let mut buf = JitterBuffer::new(params);
+        assert_eq!(buf.stats().underruns, 0, "初始应为 0");
+
+        // 预滚阶段（还没出过帧）取不到，不算欠载——
+        // 这是正确设计：连接刚建立时缓冲本来就是空的。
+        assert!(buf.pop().is_none());
+        assert_eq!(buf.stats().underruns, 0, "预滚阶段不该计欠载");
+
+        // 灌满水位，成功出帧 → 进入播放状态
+        let need = params.jitter_min_ms / params.frame_ms;
+        for seq in 0..need {
+            buf.push(Frame { seq, timestamp_ms: seq * params.frame_ms, payload: vec![1] });
+        }
+        assert!(buf.pop().is_some(), "水位够了应当能出帧");
+
+        // 现在缓冲空了，再取就是真欠载
+        let before = buf.stats().underruns;
+        assert!(buf.pop().is_none());
+        assert!(
+            buf.stats().underruns > before,
+            "播放中取不到数据必须计欠载——这是听感断续的直接指标"
+        );
+    }
+
+    /// 欠载计数只增不减（是累计值，不是瞬时值）。
+    #[test]
+    fn 欠载计数单调递增() {
+        let mut buf = JitterBuffer::new(QualityMode::Standard.params());
+        let mut last = 0u64;
+        for _ in 0..5 {
+            let _ = buf.pop();
+            let now = buf.stats().underruns;
+            assert!(now >= last, "欠载计数不能回退");
+            last = now;
+        }
+    }
+
+    /// 正常收到帧时不应产生欠载。
+    #[test]
+    fn 数据充足时不欠载() {
+        let params = QualityMode::LowLatency.params();
+        let mut buf = JitterBuffer::new(params);
+        // 灌满目标水位
+        for seq in 0..params.jitter_min_ms / params.frame_ms {
+            buf.push(Frame { seq, timestamp_ms: seq * params.frame_ms, payload: vec![1, 2, 3] });
+        }
+        let before = buf.stats().underruns;
+        assert!(buf.pop().is_some(), "水位够了应当能出帧");
+        assert_eq!(buf.stats().underruns, before, "出帧成功不该增加欠载");
+    }
+}
