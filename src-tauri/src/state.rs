@@ -31,6 +31,24 @@ pub struct PendingRequest {
     pub addr: String,
 }
 
+/// 混音台里一路音源的元数据快照。
+///
+/// 抽成结构体而不是长元组，是为了让「先取快照、再取另一把锁」
+/// 这个约束更清晰：数据先拷出来，锁就该放掉。
+struct SourceMeta {
+    stream_id: u16,
+    device_id: String,
+    name: String,
+    mode: String,
+    packets: u64,
+    lost: u64,
+    underruns: u64,
+    late: u64,
+    buffer_ms: u32,
+    latency_ms: i64,
+    active: bool,
+}
+
 /// 应用全局状态。
 pub struct AppState {
     pub engine: Arc<Engine>,
@@ -278,32 +296,51 @@ impl AppState {
         // 不回传的话前端只能写死：之前桌面端的「独奏」按钮永远传 true，
         // 点了就取消不掉，因为界面根本不知道自己当前是什么状态。
         // 移动端更是干脆没做独奏——没有可读状态，做出来也没法正确显示。
+        // 先把每路源的元数据克隆出来，**放掉 incoming 锁**，
+        // 再单独取 mixer 读控制状态。两把锁绝不重叠。
+        //
+        // 原来是「持 mixer 时取 incoming」，而 add_source 是
+        // 「持 incoming 时取 mixer」——又一处锁序反转，会 ABBA 死锁。
+        let snapshot: Vec<SourceMeta> = {
+            let list = self.engine.incoming.lock();
+            list.iter()
+                .map(|s| {
+                    let latency = s.latency_ms(now_local).unwrap_or(-1);
+                    SourceMeta {
+                        stream_id: s.stream_id,
+                        device_id: s.device_id.clone(),
+                        name: s.name.clone(),
+                        mode: s.mode.name().to_string(),
+                        packets: s.packets.load(Ordering::Relaxed),
+                        lost: s.lost_count(),
+                        underruns: s.underrun_count(),
+                        late: s.late_count(),
+                        buffer_ms: s.buffer_ms.load(Ordering::Relaxed),
+                        latency_ms: latency,
+                        active: s.active.load(Ordering::Relaxed),
+                    }
+                })
+                .collect()
+        };
+
         let mixer = self.engine.mixer.lock();
-        let sources: Vec<serde_json::Value> = self
-            .engine
-            .incoming
-            .lock()
+        let sources: Vec<serde_json::Value> = snapshot
             .iter()
-            .map(|s| {
-                // 端到端延迟需要时钟同步才有意义。未同步时给 -1，
-                // 前端据此显示「同步中」而不是一个假的数字。
-                let latency = s.latency_ms(now_local).unwrap_or(-1);
-                let ctl = mixer.source(s.stream_id);
+            .map(|m| {
+                let ctl = mixer.source(m.stream_id);
                 serde_json::json!({
-                    "stream_id": s.stream_id,
-                    "device_id": s.device_id,
-                    "name": s.name,
-                    "mode": s.mode.name(),
-                    "packets": s.packets.load(Ordering::Relaxed),
-                    "lost": s.lost_count(),
-                    // 欠载 = 听感断续。低延迟档缓冲固定 20ms，网络一抖就欠载。
-                    // 不回传的话用户只听到断音，界面上看不出任何原因。
-                    "underruns": s.underrun_count(),
-                    "late": s.late_count(),
-                    "buffer_ms": s.buffer_ms.load(Ordering::Relaxed),
-                    "latency_ms": latency,
-                    "synced": latency >= 0,
-                    "active": s.active.load(Ordering::Relaxed),
+                    "stream_id": m.stream_id,
+                    "device_id": m.device_id,
+                    "name": m.name,
+                    "mode": m.mode,
+                    "packets": m.packets,
+                    "lost": m.lost,
+                    "underruns": m.underruns,
+                    "late": m.late,
+                    "buffer_ms": m.buffer_ms,
+                    "latency_ms": m.latency_ms,
+                    "synced": m.latency_ms >= 0,
+                    "active": m.active,
                     "gain": ctl.map(|c| c.gain).unwrap_or(1.0),
                     "muted": ctl.map(|c| c.muted).unwrap_or(false),
                     "solo": ctl.map(|c| c.solo).unwrap_or(false),

@@ -470,16 +470,28 @@ impl Engine {
     }
 
     /// 加入一路接收音源。超过软上限时返回 false。
+    ///
+    /// 注意：**不在持锁状态下再取另一把锁**。
+    ///
+    /// 原来是「持 incoming 时取 mixer」，而 remove_source 是
+    /// 「持 mixer 时取 incoming」——顺序相反，是经典的 ABBA 死锁。
+    /// 触发条件很具体：UI 线程连一台设备的同时另一处断开另一台。
+    ///
+    /// 改成两段独立的临界区后，任何时刻最多只持一把锁，
+    /// 死锁在结构上就不可能发生。
     pub fn add_source(&self, source: IncomingSource) -> bool {
-        let mut list = self.incoming.lock();
-        if list.len() >= MAX_SOURCES {
-            return false;
+        let stream_id = source.stream_id;
+        {
+            let mut list = self.incoming.lock();
+            if list.len() >= MAX_SOURCES {
+                return false;
+            }
+            if list.iter().any(|s| s.stream_id == stream_id) {
+                return false;
+            }
+            list.push(source);
         }
-        if list.iter().any(|s| s.stream_id == source.stream_id) {
-            return false;
-        }
-        self.mixer.lock().add_source(source.stream_id, MAX_SOURCES);
-        list.push(source);
+        self.mixer.lock().add_source(stream_id, MAX_SOURCES);
         true
     }
 
@@ -494,12 +506,17 @@ impl Engine {
     }
 
     /// 移除一路接收音源。
+    ///
+    /// 与 add_source 同理：两段独立临界区，不嵌套持锁。
     pub fn remove_source(&self, stream_id: u16) -> bool {
+        let removed = {
+            let mut list = self.incoming.lock();
+            let before = list.len();
+            list.retain(|s| s.stream_id != stream_id);
+            list.len() != before
+        };
         self.mixer.lock().remove_source(stream_id);
-        let mut list = self.incoming.lock();
-        let before = list.len();
-        list.retain(|s| s.stream_id != stream_id);
-        list.len() != before
+        removed
     }
 
     /// 混音一轮：把每路解码结果混进输出。
@@ -836,5 +853,83 @@ mod link_stats_tests {
             0,
             "未发出的包不应计入 packets_sent，否则掩盖了发不出去的问题"
         );
+    }
+}
+
+#[cfg(test)]
+mod lock_contract_tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    /// add/remove 的结果必须正确（改锁序不能改变语义）。
+    #[test]
+    fn 增删音源语义不变() {
+        let engine = Engine::new();
+        assert!(engine.add_source(IncomingSource::new(
+            1,
+            "d1".into(),
+            "设备1".into(),
+            QualityMode::Standard
+        )));
+        assert_eq!(engine.incoming.lock().len(), 1);
+        assert!(engine.mixer.lock().source(1).is_some(), "混音台也要有这一路");
+
+        // 重复 id 应当被拒绝
+        assert!(!engine.add_source(IncomingSource::new(
+            1,
+            "d1".into(),
+            "设备1".into(),
+            QualityMode::Standard
+        )));
+
+        assert!(engine.remove_source(1));
+        assert!(engine.incoming.lock().is_empty());
+        assert!(engine.mixer.lock().source(1).is_none(), "混音台也要清掉");
+    }
+
+    /// 并发增删要在有限时间内跑完。
+    ///
+    /// 配合「两段独立临界区」的实现，这条测试能暴露锁序反转导致的死锁。
+    /// 注意：ABBA 死锁依赖时序，短临界区下不一定每次命中，
+    /// 所以真正的保证来自代码结构（不嵌套持锁），这条只是兜底。
+    #[test]
+    fn 并发增删能在限时内完成() {
+        let engine = Arc::new(Engine::new());
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::new();
+
+        for t in 0..4u16 {
+            let e = Arc::clone(&engine);
+            let s = Arc::clone(&stop);
+            handles.push(std::thread::spawn(move || {
+                let mut n = 0u16;
+                while !s.load(Ordering::Relaxed) {
+                    let id = t * 100 + (n % 20) + 1;
+                    e.add_source(IncomingSource::new(
+                        id,
+                        format!("d{id}"),
+                        format!("设备{id}"),
+                        QualityMode::Standard,
+                    ));
+                    // 同时读状态，覆盖 status 的取锁路径
+                    let _ = e.status();
+                    e.remove_source(id);
+                    n = n.wrapping_add(1);
+                }
+            }));
+        }
+
+        std::thread::sleep(Duration::from_millis(600));
+        stop.store(true, Ordering::Relaxed);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for h in handles {
+            while !h.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(h.is_finished(), "线程超时未结束 —— 疑似死锁");
+        }
     }
 }
