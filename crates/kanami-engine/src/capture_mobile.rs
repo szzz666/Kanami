@@ -31,6 +31,7 @@ use kanami_audio::{CHANNELS, SAMPLE_RATE};
 use crate::capture::{
     CaptureBackend, CaptureCallback, CaptureKind, CaptureSession, CaptureSource, CaptureStats,
 };
+use crate::sample_conv::{to_mono, LinearResampler};
 
 /// 移动端采集后端。
 pub struct MobileCaptureBackend {
@@ -228,85 +229,6 @@ fn run_input_stream(
     Ok(stream)
 }
 
-/// 多声道取平均降成单声道，再复制到双声道（项目内部统一双声道）。
-fn to_mono<T: Copy + Into<f32>>(data: &[T], channels: usize) -> Vec<f32> {
-    if channels == 0 {
-        return Vec::new();
-    }
-    let frames = data.len() / channels;
-    let mut out = Vec::with_capacity(frames);
-    for i in 0..frames {
-        let mut sum = 0.0f32;
-        for c in 0..channels {
-            sum += data[i * channels + c].into();
-        }
-        out.push(sum / channels as f32);
-    }
-    out
-}
-
-/// 极简线性插值重采样。
-///
-/// 采集侧不需要高阶滤波：Opus 编码前的抗混叠由编码器自己处理，
-/// 而这里只是把设备时钟换算到项目统一的 48k。用线性插值足够，
-/// 且没有额外延迟（rubato 的多相滤波器会引入几十个样本的群延迟）。
-struct LinearResampler {
-    from: u32,
-    to: u32,
-    /// 上一块最后一个样本，用于跨块连续插值。
-    last: f32,
-    /// 当前在小数样本上的位置（0..1）。
-    frac: f32,
-    primed: bool,
-}
-
-impl LinearResampler {
-    fn new(from: u32, to: u32) -> Self {
-        Self { from, to, last: 0.0, frac: 0.0, primed: false }
-    }
-
-    fn process(&mut self, input: &[f32]) -> Vec<f32> {
-        if self.from == self.to {
-            return duplicate_to_stereo(input);
-        }
-        if input.is_empty() {
-            return Vec::new();
-        }
-
-        let ratio = self.from as f32 / self.to as f32;
-        let mut mono_out = Vec::with_capacity((input.len() as f32 / ratio) as usize + 2);
-
-        if !self.primed {
-            self.last = input[0];
-            self.primed = true;
-        }
-
-        let mut pos = self.frac;
-        while pos < input.len() as f32 {
-            let i = pos.floor() as usize;
-            let t = pos - i as f32;
-            let a = if i == 0 { self.last } else { input[i - 1] };
-            let b = input.get(i).copied().unwrap_or(a);
-            mono_out.push(a + (b - a) * t);
-            pos += ratio;
-        }
-        self.frac = pos - input.len() as f32;
-        self.last = *input.last().unwrap();
-
-        duplicate_to_stereo(&mono_out)
-    }
-}
-
-fn duplicate_to_stereo(mono: &[f32]) -> Vec<f32> {
-    let mut out = Vec::with_capacity(mono.len() * CHANNELS);
-    for &s in mono {
-        for _ in 0..CHANNELS {
-            out.push(s);
-        }
-    }
-    out
-}
-
 /// 这台设备是否支持采集系统声音。
 ///
 /// 桌面端返回 false：系统声音在 PC 上走的是另一套（WASAPI loopback /
@@ -376,50 +298,4 @@ fn start_system_audio(
 
     log::info!("系统声音采集已就绪，开始传输");
     Ok(CaptureSession::new(source.clone(), stop, stats, Box::new(())))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn 降混把立体声取平均() {
-        let data = [1.0f32, 0.0, 0.5, 0.5];
-        let mono = to_mono(&data, 2);
-        assert_eq!(mono, vec![0.5, 0.5]);
-    }
-
-    #[test]
-    fn 同采样率时只做声道复制() {
-        let mut r = LinearResampler::new(48000, 48000);
-        let out = r.process(&[0.1, 0.2]);
-        assert_eq!(out.len(), 4, "两帧单声道 → 两帧双声道");
-        assert!((out[0] - 0.1).abs() < 1e-6);
-        assert!((out[3] - 0.2).abs() < 1e-6);
-    }
-
-    #[test]
-    fn 重采样保持时长大致不变() {
-        let mut r = LinearResampler::new(44100, 48000);
-        let input = vec![0.5f32; 4410];
-        let out = r.process(&input);
-        let frames = out.len() / CHANNELS;
-        // 4410 个 44.1k 样本 ≈ 4800 个 48k 样本
-        assert!((frames as i64 - 4800).abs() < 100, "实际 {frames} 帧");
-    }
-
-    #[test]
-    fn 重采样保持幅度() {
-        let mut r = LinearResampler::new(44100, 48000);
-        let out = r.process(&vec![0.5f32; 4410]);
-        for &s in &out {
-            assert!((s - 0.5).abs() < 1e-5, "直流信号重采样后仍应是 0.5，实际 {s}");
-        }
-    }
-
-    #[test]
-    fn 空输入不会崩() {
-        let mut r = LinearResampler::new(44100, 48000);
-        assert!(r.process(&[]).is_empty());
-    }
 }

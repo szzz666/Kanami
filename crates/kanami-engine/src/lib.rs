@@ -13,6 +13,7 @@ pub mod capture_windows;
 pub mod engine;
 pub mod platform;
 pub mod playout;
+pub mod sample_conv;
 #[cfg(target_os = "android")]
 pub mod system_audio_bridge;
 
