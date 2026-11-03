@@ -933,3 +933,95 @@ mod lock_contract_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    /// 加到上限后，继续添加应当被拒绝。
+    ///
+    /// 锁住混音台的容量语义：超过 MAX_SOURCES 必须返回 false，
+    /// 而不是悄悄挤掉已有的某一路。
+    #[test]
+    fn 达到上限后拒绝新增() {
+        let engine = Engine::new();
+        for i in 1..=MAX_SOURCES as u16 {
+            assert!(
+                engine.add_source(IncomingSource::new(
+                    i,
+                    format!("d{i}"),
+                    format!("设备{i}"),
+                    QualityMode::Standard,
+                )),
+                "第 {i} 路应当能加入（上限 {MAX_SOURCES}）"
+            );
+        }
+        assert_eq!(engine.incoming.lock().len(), MAX_SOURCES);
+
+        // 第 MAX_SOURCES + 1 路必须被拒
+        let extra = MAX_SOURCES as u16 + 1;
+        assert!(
+            !engine.add_source(IncomingSource::new(
+                extra,
+                "extra".into(),
+                "多余设备".into(),
+                QualityMode::Standard,
+            )),
+            "超过上限必须返回 false"
+        );
+        assert_eq!(engine.incoming.lock().len(), MAX_SOURCES, "已满时数量不能变");
+    }
+
+    /// 满额时移除一路，应当能再加入新的。
+    ///
+    /// 这条覆盖「用户连满 8 路后断开一个再连新的」这个真实场景。
+    /// 如果 remove 没清干净，新连接会一直被拒。
+    #[test]
+    fn 移除后可以再加入() {
+        let engine = Engine::new();
+        for i in 1..=MAX_SOURCES as u16 {
+            engine.add_source(IncomingSource::new(
+                i,
+                format!("d{i}"),
+                format!("设备{i}"),
+                QualityMode::Standard,
+            ));
+        }
+        assert!(engine.remove_source(3), "移除第 3 路应当成功");
+        assert_eq!(engine.incoming.lock().len(), MAX_SOURCES - 1);
+
+        // 现在应当能加一路新的
+        let new_id = MAX_SOURCES as u16 + 10;
+        assert!(
+            engine.add_source(IncomingSource::new(
+                new_id,
+                "new".into(),
+                "新设备".into(),
+                QualityMode::Standard,
+            )),
+            "移除一路后应当能加入新的一路"
+        );
+    }
+
+    /// 重复 stream_id 不能覆盖已有音源。
+    #[test]
+    fn 重复id被拒绝而不是覆盖() {
+        let engine = Engine::new();
+        assert!(engine.add_source(IncomingSource::new(
+            1,
+            "a".into(),
+            "A".into(),
+            QualityMode::Standard
+        )));
+        assert!(!engine.add_source(IncomingSource::new(
+            1,
+            "b".into(),
+            "B".into(),
+            QualityMode::HighQuality
+        )));
+
+        let list = engine.incoming.lock();
+        assert_eq!(list.len(), 1, "不能变成两路");
+        assert_eq!(list[0].device_id, "a", "原来的那一路不能被覆盖");
+    }
+}

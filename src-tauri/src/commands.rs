@@ -320,14 +320,19 @@ pub fn connect_to_peer(state: State<'_, AppState>, device_id: String) -> Result<
     let mode = *state.mode.lock();
     log::info!("准备连接 {} → {}:{}", peer.name, peer.addr.ip(), peer.signal_port);
 
+    // 先检查上限，再分配 stream_id。
+    //
+    // 顺序反了的话，每次「已满时尝试连接」都会白白消耗一个 stream_id。
+    // u16 只有 65535 个，反复触发会造成不必要的提前回绕。
+    if state.engine.incoming.lock().len() >= MAX_SOURCES {
+        return Err(format!("同时接入的音源已达上限 {MAX_SOURCES} 路"));
+    }
+
     // 分配一个独立的 stream_id。
     //
     // 这个号必须每路不同：混音台按 stream_id 区分音源，
     // 写死成 1 的话第二路会盖掉第一路的数据。
     let stream_id = state.next_stream_id();
-    if state.engine.incoming.lock().len() >= MAX_SOURCES {
-        return Err(format!("同时接入的音源已达上限 {MAX_SOURCES} 路"));
-    }
 
     // 信令连接：播放端主动发起
     let signal_addr = SocketAddr::new(peer.addr.ip(), peer.signal_port);
