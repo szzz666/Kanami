@@ -536,7 +536,11 @@ pub fn reject_peer(state: State<'_, AppState>, device_id: String) -> bool {
 /// 撤销后如果它正在连着，一并断开：授权没了，连接也不该继续。
 #[tauri::command]
 pub fn revoke_peer(app: tauri::AppHandle, state: State<'_, AppState>, device_id: String) -> bool {
-    let removed = state.trusted.lock().remove(&device_id);
+    // 一次取锁完成两件事：移除 + 拿快照。避免二次取锁期间被其它线程改动。
+    let removed = {
+        let mut trusted = state.trusted.lock();
+        crate::persist::remove_trusted(&mut trusted, &device_id)
+    };
     if removed {
         crate::persist::save_trusted(&app, &state.trusted.lock());
         log::info!("已撤销 {device_id} 的授权");

@@ -97,6 +97,15 @@ pub fn save_session(app: &AppHandle, state: &SessionState) {
     }
 }
 
+/// 从白名单里移除一台设备。返回「原本是否在里面」。
+///
+/// 抽成纯函数是为了能单测：revoke_peer 本身要 AppHandle，
+/// 测试环境构造不出来，而这段逻辑（幂等移除 + 如实返回结果）
+/// 才是撤销功能的核心正确性。
+pub fn remove_trusted(trusted: &mut HashSet<String>, device_id: &str) -> bool {
+    trusted.remove(device_id)
+}
+
 /// 读回已授权的设备 ID。
 ///
 /// 文件不存在、格式坏了、没权限——统统当作空集合，
@@ -221,5 +230,62 @@ mod session_tests {
     fn 缺字段时用默认值() {
         let r: Result<SessionState, _> = serde_json::from_str("{}");
         assert!(r.is_err(), "缺 sending 字段时应当报错而不是猜一个值");
+    }
+}
+
+#[cfg(test)]
+mod revoke_tests {
+    use super::*;
+
+    /// 撤销已授权的设备应当成功，且从集合里消失。
+    #[test]
+    fn 撤销已授权设备() {
+        let mut set = HashSet::new();
+        set.insert("dev-a".to_string());
+        set.insert("dev-b".to_string());
+
+        assert!(remove_trusted(&mut set, "dev-a"), "撤销应当返回 true");
+        assert!(!set.contains("dev-a"), "被撤销的设备必须不在集合里");
+        assert!(set.contains("dev-b"), "其它设备的授权不能受影响");
+    }
+
+    /// 撤销一个本来就没授权的设备，应当如实返回 false。
+    ///
+    /// 这条很重要：前端据此判断「是不是真的撤销了」
+    /// 并决定要不要提示「本来就没授权」。
+    #[test]
+    fn 撤销未授权设备返回false() {
+        let mut set = HashSet::new();
+        set.insert("dev-a".to_string());
+        assert!(!remove_trusted(&mut set, "dev-x"), "没授权过的应当返回 false");
+        assert_eq!(set.len(), 1, "集合内容不能变");
+    }
+
+    /// 重复撤销同一台设备是幂等的。
+    #[test]
+    fn 重复撤销是幂等的() {
+        let mut set = HashSet::new();
+        set.insert("dev-a".to_string());
+        assert!(remove_trusted(&mut set, "dev-a"), "第一次应当成功");
+        assert!(!remove_trusted(&mut set, "dev-a"), "第二次应当返回 false");
+        assert!(set.is_empty());
+    }
+
+    /// 撤销后落盘的名单不能还包含它。
+    ///
+    /// 这是撤销功能最容易出错的地方：内存里删了、文件里没删，
+    /// 重启后那台设备又回来了——用户会觉得「撤销根本没生效」。
+    #[test]
+    fn 撤销后序列化不含被撤销设备() {
+        let mut set = HashSet::new();
+        set.insert("dev-a".to_string());
+        set.insert("dev-b".to_string());
+        remove_trusted(&mut set, "dev-a");
+
+        // 模拟 save_trusted 的序列化
+        let list: Vec<&String> = set.iter().collect();
+        let text = serde_json::to_string(&list).unwrap();
+        assert!(!text.contains("dev-a"), "落盘内容不能包含被撤销的设备");
+        assert!(text.contains("dev-b"));
     }
 }
