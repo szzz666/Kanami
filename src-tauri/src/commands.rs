@@ -371,10 +371,22 @@ pub fn connect_to_peer(state: State<'_, AppState>, device_id: String) -> Result<
 
     // 接收线程：按 stream_id 精确投递到对应那一路，
     // 不能写 first_mut()——那样所有音源的数据会挤进同一路。
+    //
+    // **必须能退出**。原来的循环只在 try_recv 返回 Err 时 break，
+    // 而断开连接时 socket 本身不会出错——它只是再也收不到包。
+    // 于是线程会永远空转（每 1ms 一次），socket 也一直不释放。
+    // 每连一次漏一个线程 + 一个 socket，长跑必然耗尽资源。
+    //
+    // 现在每轮检查这一路是否还在混音台里：被 remove_source 之后就退出。
     let engine = std::sync::Arc::clone(&state.engine);
     std::thread::Builder::new()
         .name(format!("kanami-rx-{stream_id}"))
         .spawn(move || loop {
+            // 这一路被移除了就退出，顺带释放 socket
+            if !engine.incoming.lock().iter().any(|s| s.stream_id == stream_id) {
+                log::debug!("接收线程退出：stream_id={stream_id} 已从混音台移除");
+                break;
+            }
             match socket.try_recv() {
                 Ok(Some((header, payload, _))) => {
                     if header.kind.is_audio() {
